@@ -115,6 +115,25 @@
           <p class="text-sm text-gray-600 mt-1">{{ selectedEntry.goal }}</p>
         </div>
 
+        <!-- Focal Person (read-only, assigned by admin) -->
+        <div
+          v-if="entryData[selectedEntry.id]?.focalPerson"
+          class="flex items-center gap-3 bg-blue-50 border border-blue-200 rounded-lg px-4 py-3"
+        >
+          <div class="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center flex-shrink-0">
+            <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+            </svg>
+          </div>
+          <div class="flex-1">
+            <p class="text-xs font-medium text-blue-600 uppercase tracking-wide">Assigned Focal Person</p>
+            <p class="text-sm font-semibold text-blue-900">{{ entryData[selectedEntry.id].focalPerson }}</p>
+          </div>
+          <span class="inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-medium text-blue-700">
+            Admin Assigned
+          </span>
+        </div>
+
         <PerformanceForm
           :entry="selectedEntry"
           :quarter="currentQuarter"
@@ -307,6 +326,7 @@ const loadQuarterlyData = async () => {
     
     newEntryData[entry.id] = {
       recordId: record?.id || null,
+      focalPerson: record?.focalPerson || '',
       performance: {
         quarterlyTarget: record?.quarterlyTarget || '',
         month1: record?.month1 || '',

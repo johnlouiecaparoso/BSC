@@ -81,44 +81,110 @@
 
     <!-- Row 1: Status Doughnut + Accomplishment Bar -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <AppCard title="Status Distribution">
-        <StatusDoughnutChart :data="statusDistribution" />
+      <AppCard>
+        <template #header>
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-900">Status Distribution</h3>
+            <ChartExportButton
+              target-selector="#dash-chart-status"
+              filename="dashboard-status-distribution"
+            />
+          </div>
+        </template>
+        <div id="dash-chart-status">
+          <StatusDoughnutChart :data="statusDistribution" />
+        </div>
       </AppCard>
 
-      <AppCard title="Overall Accomplishment">
-        <AccomplishmentBarChart
-          :labels="accomplishmentLabels"
-          :data="accomplishmentData"
-          title="Top Performing Offices"
-        />
+      <AppCard>
+        <template #header>
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-900">Overall Accomplishment</h3>
+            <ChartExportButton
+              target-selector="#dash-chart-accomplishment"
+              filename="dashboard-accomplishment"
+            />
+          </div>
+        </template>
+        <div id="dash-chart-accomplishment">
+          <AccomplishmentBarChart
+            :labels="accomplishmentLabels"
+            :data="accomplishmentData"
+            title="Top Performing Offices"
+          />
+        </div>
       </AppCard>
     </div>
 
     <!-- Row 2: Monthly Trend + Performance Gauge -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <AppCard title="Monthly Trend">
-        <MonthlyTrendLineChart :data="monthlyTrend" />
+      <AppCard>
+        <template #header>
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-900">Monthly Trend</h3>
+            <ChartExportButton
+              target-selector="#dash-chart-monthly-trend"
+              filename="dashboard-monthly-trend"
+            />
+          </div>
+        </template>
+        <div id="dash-chart-monthly-trend">
+          <MonthlyTrendLineChart :data="monthlyTrend" />
+        </div>
       </AppCard>
 
-      <AppCard title="Overall Performance">
-        <AccomplishmentGauge :percentage="gaugePercentage" />
+      <AppCard>
+        <template #header>
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-900">Overall Performance</h3>
+            <ChartExportButton
+              target-selector="#dash-chart-gauge"
+              filename="dashboard-performance-gauge"
+            />
+          </div>
+        </template>
+        <div id="dash-chart-gauge">
+          <AccomplishmentGauge :percentage="gaugePercentage" />
+        </div>
       </AppCard>
     </div>
 
     <!-- Row 3: Goal Performance (full width) -->
-    <AppCard title="Performance by Goal">
-      <GoalStackedBarChart
-        :labels="goalLabels"
-        :datasets="goalDatasets"
-      />
+    <AppCard>
+      <template #header>
+        <div class="flex items-center justify-between">
+          <h3 class="text-lg font-semibold text-gray-900">Performance by Goal</h3>
+          <ChartExportButton
+            target-selector="#dash-chart-goal-performance"
+            filename="dashboard-goal-performance"
+          />
+        </div>
+      </template>
+      <div id="dash-chart-goal-performance">
+        <GoalStackedBarChart
+          :labels="goalLabels"
+          :datasets="goalDatasets"
+        />
+      </div>
     </AppCard>
 
     <!-- Row 4: Office Comparison (full width) -->
-    <AppCard title="Office Comparison">
-      <OfficeComparisonChart
-        :labels="comparisonLabels"
-        :data="comparisonData"
-      />
+    <AppCard>
+      <template #header>
+        <div class="flex items-center justify-between">
+          <h3 class="text-lg font-semibold text-gray-900">Office Comparison</h3>
+          <ChartExportButton
+            target-selector="#dash-chart-office-comparison"
+            filename="dashboard-office-comparison"
+          />
+        </div>
+      </template>
+      <div id="dash-chart-office-comparison">
+        <OfficeComparisonChart
+          :labels="comparisonLabels"
+          :data="comparisonData"
+        />
+      </div>
     </AppCard>
 
     <!-- Alerts Table -->
@@ -131,6 +197,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import AppCard from '@/components/common/AppCard.vue'
 import AppButton from '@/components/common/AppButton.vue'
+import ChartExportButton from '@/components/charts/ChartExportButton.vue'
 import StatusDoughnutChart from '@/components/charts/StatusDoughnutChart.vue'
 import AccomplishmentBarChart from '@/components/charts/AccomplishmentBarChart.vue'
 import MonthlyTrendLineChart from '@/components/charts/MonthlyTrendLineChart.vue'

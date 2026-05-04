@@ -26,10 +26,10 @@
       />
 
       <AppSelect
-        v-model="localFilters.quarter"
-        label="Quarter"
-        placeholder="All Quarters"
-        :options="quarterOptions"
+        v-model="localFilters.perspective"
+        label="Perspective"
+        placeholder="All Perspectives"
+        :options="perspectiveOptions"
         @change="handleFilterChange"
       />
 
@@ -38,14 +38,6 @@
         label="Status"
         placeholder="All Statuses"
         :options="statusOptions"
-        @change="handleFilterChange"
-      />
-
-      <AppSelect
-        v-model="localFilters.perspective"
-        label="Perspective"
-        placeholder="All Perspectives"
-        :options="perspectiveOptions"
         @change="handleFilterChange"
       />
 
@@ -67,44 +59,95 @@
 </template>
 
 <script setup>
-import { reactive, watch, computed } from 'vue'
+import { reactive, watch, computed, onMounted, ref } from 'vue'
 import AppCard from '@/components/common/AppCard.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
 import AppButton from '@/components/common/AppButton.vue'
+import { supabase } from '@/lib/supabase'
 
 const props = defineProps({
   filters: {
     type: Object,
     default: () => ({})
-  },
-  offices: {
-    type: Array,
-    default: () => []
   }
 })
 
 const emit = defineEmits(['update:filters', 'clear'])
 
+// Dynamic options loaded from the database
+const officesList = ref([])
+
+onMounted(async () => {
+  await loadOffices()
+})
+
+const loadOffices = async () => {
+  try {
+    const { data, error } = await supabase
+      .from('offices')
+      .select(`
+        id,
+        office_name,
+        pillar,
+        assignment_type,
+        profiles (
+          status
+        )
+      `)
+      .order('office_name')
+
+    if (error) throw error
+
+    // Only include approved offices
+    officesList.value = (data || []).filter(o => o.profiles?.status === 'approved')
+  } catch (err) {
+    console.error('Error loading offices for filter:', err)
+    officesList.value = []
+  }
+}
+
 const officeOptions = computed(() => {
-  return props.offices.map(office => ({
-    value: office.officeName,
-    label: office.officeName
+  return officesList.value.map(office => ({
+    value: office.office_name,
+    label: office.office_name
   }))
 })
+
 const pillarOptions = computed(() => {
-  return [...new Set(
-    props.offices
+  const pillars = [...new Set(
+    officesList.value
       .map(office => office.pillar)
       .filter(Boolean)
-  )].map(pillar => ({
-    value: pillar,
-    label: pillar
-  }))
+  )]
+  return pillars.map(p => ({ value: p, label: p }))
 })
-const assignmentTypeOptions = ['Strategic', 'Core', 'Support']
-const quarterOptions = ['Q1', 'Q2', 'Q3', 'Q4']
-const statusOptions = ['Not Started', 'Ongoing', 'Completed', 'Delayed', 'For Validation']
-const perspectiveOptions = ['Stakeholders', 'Process Excellence', 'Talents, Learning & Growth', 'Financial']
+
+const assignmentTypeOptions = computed(() => {
+  const types = [...new Set(
+    officesList.value
+      .map(office => office.assignment_type)
+      .filter(Boolean)
+  )]
+  return types.length > 0
+    ? types.map(t => ({ value: t, label: t }))
+    : ['Strategic', 'Core', 'Support'].map(t => ({ value: t, label: t }))
+})
+
+const perspectiveOptions = [
+  { value: 'Stakeholders', label: 'Stakeholders' },
+  { value: 'Process Excellence', label: 'Process Excellence' },
+  { value: 'Talents, Learning & Growth', label: 'Talents, Learning & Growth' },
+  { value: 'Financial', label: 'Financial' }
+]
+
+const statusOptions = [
+  { value: 'Not Started', label: 'Not Started' },
+  { value: 'Ongoing', label: 'Ongoing' },
+  { value: 'Completed', label: 'Completed' },
+  { value: 'Delayed', label: 'Delayed' },
+  { value: 'For Validation', label: 'For Validation' }
+]
+
 const focalPersonOptions = [
   { value: 'yes', label: 'Assigned' },
   { value: 'no', label: 'Not Assigned' }
@@ -114,9 +157,8 @@ const localFilters = reactive({
   office: '',
   pillar: '',
   assignmentType: '',
-  quarter: '',
-  status: '',
   perspective: '',
+  status: '',
   hasFocalPerson: ''
 })
 

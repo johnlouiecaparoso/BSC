@@ -26,7 +26,7 @@
             :key="q.value"
             :variant="selectedQuarter === q.value ? 'primary' : 'outline'"
             size="sm"
-            @click="selectedQuarter = q.value"
+            @click="selectQuarter(q.value)"
           >
             {{ q.label }}
           </AppButton>
@@ -46,50 +46,132 @@
       </div>
     </div>
 
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <AppCard :title="selectedOffice ? `${selectedOffice} - Accomplishment by KPI` : 'University-wide Accomplishment'">
-        <AccomplishmentBarChart
-          :labels="chartData.accomplishmentLabels"
-          :data="chartData.accomplishmentData"
-        />
-      </AppCard>
-
-      <AppCard title="Status Distribution">
-        <StatusDoughnutChart :data="chartData.statusDistribution" />
-      </AppCard>
-
-      <AppCard title="Monthly Trend">
-        <MonthlyTrendLineChart :data="chartData.monthlyTrend" />
-      </AppCard>
-
-      <AppCard :title="`${selectedQuarter.toUpperCase()} Performance Gauge`">
-        <AccomplishmentGauge :percentage="chartData.gaugePercentage" />
-      </AppCard>
+    <!-- Loading State -->
+    <div v-if="loading" class="flex items-center justify-center py-12">
+      <div class="flex items-center gap-3 text-gray-500">
+        <svg class="animate-spin w-5 h-5" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>
+        <span>Loading analytics...</span>
+      </div>
     </div>
 
-    <AppCard title="Performance by Goal">
-      <GoalStackedBarChart
-        :labels="chartData.goalLabels"
-        :datasets="chartData.goalDatasets"
-      />
-    </AppCard>
+    <template v-if="!loading">
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <AppCard>
+          <template #header>
+            <div class="flex items-center justify-between">
+              <h3 class="text-lg font-semibold text-gray-900">
+                {{ selectedOffice ? `${selectedOffice} - Accomplishment by KPI` : 'University-wide Accomplishment' }}
+              </h3>
+              <ChartExportButton
+                target-selector="#chart-accomplishment"
+                :filename="`accomplishment-${selectedQuarter}`"
+              />
+            </div>
+          </template>
+          <div id="chart-accomplishment">
+            <AccomplishmentBarChart
+              :labels="chartData.accomplishmentLabels"
+              :data="chartData.accomplishmentData"
+            />
+          </div>
+        </AppCard>
 
-    <AppCard title="Office Comparison">
-      <OfficeComparisonChart
-        :labels="chartData.comparisonLabels"
-        :data="chartData.comparisonData"
-        :highlight-office-id="selectedOffice"
-      />
-    </AppCard>
+        <AppCard>
+          <template #header>
+            <div class="flex items-center justify-between">
+              <h3 class="text-lg font-semibold text-gray-900">Status Distribution</h3>
+              <ChartExportButton
+                target-selector="#chart-status"
+                :filename="`status-distribution-${selectedQuarter}`"
+              />
+            </div>
+          </template>
+          <div id="chart-status">
+            <StatusDoughnutChart :data="chartData.statusDistribution" />
+          </div>
+        </AppCard>
+
+        <AppCard>
+          <template #header>
+            <div class="flex items-center justify-between">
+              <h3 class="text-lg font-semibold text-gray-900">Monthly Trend</h3>
+              <ChartExportButton
+                target-selector="#chart-monthly-trend"
+                :filename="`monthly-trend-${selectedQuarter}`"
+              />
+            </div>
+          </template>
+          <div id="chart-monthly-trend">
+            <MonthlyTrendLineChart :data="chartData.monthlyTrend" />
+          </div>
+        </AppCard>
+
+        <AppCard>
+          <template #header>
+            <div class="flex items-center justify-between">
+              <h3 class="text-lg font-semibold text-gray-900">{{ selectedQuarter.toUpperCase() }} Performance Gauge</h3>
+              <ChartExportButton
+                target-selector="#chart-gauge"
+                :filename="`performance-gauge-${selectedQuarter}`"
+              />
+            </div>
+          </template>
+          <div id="chart-gauge">
+            <AccomplishmentGauge :percentage="chartData.gaugePercentage" />
+          </div>
+        </AppCard>
+      </div>
+
+      <AppCard>
+        <template #header>
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-900">Performance by Goal</h3>
+            <ChartExportButton
+              target-selector="#chart-goal-performance"
+              :filename="`goal-performance-${selectedQuarter}`"
+            />
+          </div>
+        </template>
+        <div id="chart-goal-performance">
+          <GoalStackedBarChart
+            :labels="chartData.goalLabels"
+            :datasets="chartData.goalDatasets"
+          />
+        </div>
+      </AppCard>
+
+      <AppCard>
+        <template #header>
+          <div class="flex items-center justify-between">
+            <h3 class="text-lg font-semibold text-gray-900">Office Comparison</h3>
+            <ChartExportButton
+              target-selector="#chart-office-comparison"
+              :filename="`office-comparison-${selectedQuarter}`"
+            />
+          </div>
+        </template>
+        <div id="chart-office-comparison">
+          <OfficeComparisonChart
+            :labels="chartData.comparisonLabels"
+            :data="chartData.comparisonData"
+            :highlight-office-id="selectedOffice"
+          />
+        </div>
+      </AppCard>
+    </template>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import AppCard from '@/components/common/AppCard.vue'
 import AppButton from '@/components/common/AppButton.vue'
 import SearchBar from '@/components/admin/SearchBar.vue'
 import FilterPanel from '@/components/admin/FilterPanel.vue'
+import ChartExportButton from '@/components/charts/ChartExportButton.vue'
 import AccomplishmentBarChart from '@/components/charts/AccomplishmentBarChart.vue'
 import MonthlyTrendLineChart from '@/components/charts/MonthlyTrendLineChart.vue'
 import StatusDoughnutChart from '@/components/charts/StatusDoughnutChart.vue'
@@ -101,6 +183,7 @@ import * as analyticsService from '@/services/analyticsService'
 const searchQuery = ref('')
 const selectedOffice = ref('')
 const selectedQuarter = ref('q1')
+const loading = ref(false)
 
 const quarters = [
   { value: 'q1', label: 'Q1' },
@@ -110,11 +193,10 @@ const quarters = [
 ]
 
 const filters = reactive({
+  office: '',
   pillar: '',
   assignmentType: '',
-  goal: '',
   perspective: '',
-  quarter: '',
   status: '',
   hasFocalPerson: ''
 })
@@ -142,37 +224,51 @@ onMounted(async () => {
 })
 
 const loadAnalytics = async () => {
-  const statusData = await analyticsService.getStatusDistribution({
-    ...filters,
-    quarter: selectedQuarter.value
-  })
-  chartData.statusDistribution = statusData
+  loading.value = true
+  try {
+    const activeFilters = { ...filters, quarter: selectedQuarter.value }
 
-  // Load accomplishment data by office with optional office filter
-  const accomplishmentByOffice = await analyticsService.getAccomplishmentByOffice(selectedQuarter.value, selectedOffice.value || null)
-  chartData.accomplishmentLabels = accomplishmentByOffice.map(o => o.officeName)
-  chartData.accomplishmentData = accomplishmentByOffice.map(o => o.percentage)
+    // Status Distribution
+    const statusData = await analyticsService.getStatusDistribution(activeFilters)
+    chartData.statusDistribution = statusData
 
-  // Load comparison data (same data, for comparison chart)
-  chartData.comparisonLabels = accomplishmentByOffice.map(o => o.officeName)
-  chartData.comparisonData = accomplishmentByOffice.map(o => o.percentage)
+    // Load accomplishment data by office with optional office filter
+    const accomplishmentByOffice = await analyticsService.getAccomplishmentByOffice(
+      selectedQuarter.value,
+      selectedOffice.value || null,
+      filters
+    )
+    chartData.accomplishmentLabels = accomplishmentByOffice.map(o => o.officeName)
+    chartData.accomplishmentData = accomplishmentByOffice.map(o => o.percentage)
 
-  // Load monthly trend
-  const monthlyTrend = await analyticsService.getMonthlyTrend(null)
-  chartData.monthlyTrend = monthlyTrend
+    // Load comparison data (same data, for comparison chart)
+    chartData.comparisonLabels = accomplishmentByOffice.map(o => o.officeName)
+    chartData.comparisonData = accomplishmentByOffice.map(o => o.percentage)
 
-  // Compute gauge percentage from overall stats
-  const overallStats = await analyticsService.getUniversityWideStats()
-  // Average from accomplishment data
-  const totalPct = chartData.accomplishmentData.reduce((a, b) => a + b, 0)
-  chartData.gaugePercentage = chartData.accomplishmentData.length > 0
-    ? Math.round(totalPct / chartData.accomplishmentData.length)
-    : 0
+    // Load monthly trend
+    const monthlyTrend = await analyticsService.getMonthlyTrend(null, 2026, filters)
+    chartData.monthlyTrend = monthlyTrend
 
-  // Load goal performance
-  const goalPerf = await analyticsService.getGoalPerformance(selectedQuarter.value)
-  chartData.goalLabels = goalPerf.labels || []
-  chartData.goalDatasets = goalPerf.datasets || []
+    // Compute gauge percentage from overall stats
+    const totalPct = chartData.accomplishmentData.reduce((a, b) => a + b, 0)
+    chartData.gaugePercentage = chartData.accomplishmentData.length > 0
+      ? Math.round(totalPct / chartData.accomplishmentData.length)
+      : 0
+
+    // Load goal performance
+    const goalPerf = await analyticsService.getGoalPerformance(selectedQuarter.value, filters)
+    chartData.goalLabels = goalPerf.labels || []
+    chartData.goalDatasets = goalPerf.datasets || []
+  } catch (err) {
+    console.error('Error loading analytics:', err)
+  } finally {
+    loading.value = false
+  }
+}
+
+const selectQuarter = (q) => {
+  selectedQuarter.value = q
+  loadAnalytics()
 }
 
 const handleSearch = (query) => {

@@ -26,10 +26,34 @@
       />
 
       <AppSelect
+        v-model="localFilters.goal"
+        label="Goal"
+        placeholder="All Goals"
+        :options="goalOptions"
+        @change="handleFilterChange"
+      />
+
+      <AppSelect
         v-model="localFilters.perspective"
         label="Perspective"
         placeholder="All Perspectives"
         :options="perspectiveOptions"
+        @change="handleFilterChange"
+      />
+
+      <AppSelect
+        v-model="localFilters.strategicObjective"
+        label="Strategic Objective"
+        placeholder="All Strategic Objectives"
+        :options="strategicObjectiveOptions"
+        @change="handleFilterChange"
+      />
+
+      <AppSelect
+        v-model="localFilters.kpi"
+        label="KPI / Strategic Measure"
+        placeholder="All KPIs"
+        :options="kpiOptions"
         @change="handleFilterChange"
       />
 
@@ -76,6 +100,7 @@ const emit = defineEmits(['update:filters', 'clear'])
 
 // Dynamic options loaded from the database
 const officesList = ref([])
+const bscEntries = ref([])
 
 onMounted(async () => {
   await loadOffices()
@@ -100,9 +125,41 @@ const loadOffices = async () => {
 
     // Only include approved offices
     officesList.value = (data || []).filter(o => o.profiles?.status === 'approved')
+    await loadBscEntries()
   } catch (err) {
     console.error('Error loading offices for filter:', err)
     officesList.value = []
+    bscEntries.value = []
+  }
+}
+
+const loadBscEntries = async () => {
+  try {
+    const officeIds = officesList.value.map(office => office.id)
+
+    if (officeIds.length === 0) {
+      bscEntries.value = []
+      return
+    }
+
+    const { data, error } = await supabase
+      .from('bsc_entries')
+      .select(`
+        id,
+        office_id,
+        goal,
+        perspective,
+        strategic_objective,
+        kpi
+      `)
+      .in('office_id', officeIds)
+
+    if (error) throw error
+
+    bscEntries.value = data || []
+  } catch (err) {
+    console.error('Error loading BSC entries for filter:', err)
+    bscEntries.value = []
   }
 }
 
@@ -140,6 +197,36 @@ const perspectiveOptions = [
   { value: 'Financial', label: 'Financial' }
 ]
 
+const goalOptions = computed(() => {
+  const goals = [...new Set(
+    bscEntries.value
+      .map(entry => entry.goal)
+      .filter(Boolean)
+  )]
+
+  return goals.map(goal => ({ value: goal, label: goal }))
+})
+
+const strategicObjectiveOptions = computed(() => {
+  const objectives = [...new Set(
+    bscEntries.value
+      .map(entry => entry.strategic_objective)
+      .filter(Boolean)
+  )]
+
+  return objectives.map(objective => ({ value: objective, label: objective }))
+})
+
+const kpiOptions = computed(() => {
+  const kpis = [...new Set(
+    bscEntries.value
+      .map(entry => entry.kpi)
+      .filter(Boolean)
+  )]
+
+  return kpis.map(kpi => ({ value: kpi, label: kpi }))
+})
+
 const statusOptions = [
   { value: 'Not Started', label: 'Not Started' },
   { value: 'Ongoing', label: 'Ongoing' },
@@ -157,7 +244,10 @@ const localFilters = reactive({
   office: '',
   pillar: '',
   assignmentType: '',
+  goal: '',
   perspective: '',
+  strategicObjective: '',
+  kpi: '',
   status: '',
   hasFocalPerson: ''
 })

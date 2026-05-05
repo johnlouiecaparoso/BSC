@@ -52,7 +52,7 @@ const emit = defineEmits(['update:modelValue', 'save'])
 const localValue = ref('')
 
 const hasChanges = computed(() => {
-  return localValue.value !== props.modelValue
+  return Boolean(props.recordId) && localValue.value !== props.modelValue
 })
 
 watch(() => props.modelValue, (newValue) => {

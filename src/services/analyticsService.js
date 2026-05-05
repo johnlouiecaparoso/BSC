@@ -1,5 +1,30 @@
 import { supabase } from '@/lib/supabase'
 
+const normalizeText = (value) => (value || '').toString().trim().toLowerCase()
+
+const matchesContains = (value, filterValue) => {
+  if (!filterValue) return true
+  return normalizeText(value).includes(normalizeText(filterValue))
+}
+
+const applyRecordFilters = (records = [], filters = {}) => {
+  return records.filter((record) => {
+    if (filters.status && record.status !== filters.status) {
+      return false
+    }
+
+    if (filters.hasFocalPerson === 'yes') {
+      return Boolean(record.focal_person && record.focal_person.trim() !== '')
+    }
+
+    if (filters.hasFocalPerson === 'no') {
+      return !record.focal_person || record.focal_person.trim() === ''
+    }
+
+    return true
+  })
+}
+
 /**
  * Analytics Service
  * Full Supabase implementation for analytics and chart data
@@ -162,7 +187,7 @@ async function resolveFilteredOfficeIds(filters = {}) {
 async function resolveFilteredEntryIds(officeIds, filters = {}) {
   let query = supabase
     .from('bsc_entries')
-    .select('id, office_id, perspective')
+    .select('id, office_id, goal, perspective, strategic_objective, kpi')
 
   if (officeIds !== null && officeIds.length > 0) {
     query = query.in('office_id', officeIds)
@@ -170,14 +195,17 @@ async function resolveFilteredEntryIds(officeIds, filters = {}) {
     return []
   }
 
-  if (filters.perspective) {
-    query = query.eq('perspective', filters.perspective)
-  }
-
   const { data, error } = await query
   if (error) throw error
 
-  return (data || []).map(e => e.id)
+  return (data || [])
+    .filter(entry =>
+      matchesContains(entry.goal, filters.goal) &&
+      matchesContains(entry.perspective, filters.perspective) &&
+      matchesContains(entry.strategic_objective, filters.strategicObjective) &&
+      matchesContains(entry.kpi, filters.kpi)
+    )
+    .map(e => e.id)
 }
 
 /**
@@ -194,7 +222,7 @@ export async function getStatusDistribution(filters = {}) {
     // If filters were applied and resulted in empty set, return zeros
     if ((officeIds !== null && officeIds.length === 0) || entryIds.length === 0) {
       // Only return zeros if a filter was actually set
-      const anyFilterSet = filters.office || filters.pillar || filters.assignmentType || filters.perspective
+      const anyFilterSet = filters.office || filters.pillar || filters.assignmentType || filters.goal || filters.perspective || filters.strategicObjective || filters.kpi
       if (anyFilterSet) {
         return { notStarted: 0, ongoing: 0, completed: 0, delayed: 0, forValidation: 0 }
       }
@@ -208,7 +236,13 @@ export async function getStatusDistribution(filters = {}) {
       query = query.eq('quarter', filters.quarter)
     }
 
-    if (entryIds.length > 0 && (officeIds !== null || filters.perspective)) {
+    if (entryIds.length > 0 && (
+      officeIds !== null ||
+      filters.goal ||
+      filters.perspective ||
+      filters.strategicObjective ||
+      filters.kpi
+    )) {
       query = query.in('bsc_entry_id', entryIds)
     }
 
@@ -221,13 +255,7 @@ export async function getStatusDistribution(filters = {}) {
 
     if (error) throw error
 
-    // Apply focal person filter client-side for reliability
-    let filteredData = data || []
-    if (filters.hasFocalPerson === 'yes') {
-      filteredData = filteredData.filter(r => r.focal_person && r.focal_person.trim() !== '')
-    } else if (filters.hasFocalPerson === 'no') {
-      filteredData = filteredData.filter(r => !r.focal_person || r.focal_person.trim() === '')
-    }
+    const filteredData = applyRecordFilters(data || [], filters)
 
     const distribution = {
       notStarted: 0,
@@ -308,17 +336,19 @@ export async function getAccomplishmentByOffice(quarter = 'q1', officeFilter = n
       // Get entries for this office
       let entryQuery = supabase
         .from('bsc_entries')
-        .select('id')
+        .select('id, goal, perspective, strategic_objective, kpi')
         .eq('office_id', office.id)
-
-      // Filter by perspective
-      if (filters.perspective) {
-        entryQuery = entryQuery.eq('perspective', filters.perspective)
-      }
 
       const { data: entries } = await entryQuery
 
-      const entryIds = (entries || []).map(e => e.id)
+      const filteredEntries = (entries || []).filter(entry =>
+        matchesContains(entry.goal, filters.goal) &&
+        matchesContains(entry.perspective, filters.perspective) &&
+        matchesContains(entry.strategic_objective, filters.strategicObjective) &&
+        matchesContains(entry.kpi, filters.kpi)
+      )
+
+      const entryIds = filteredEntries.map(e => e.id)
 
       // Check if any record-level filters are active
       const hasRecordFilter = filters.status || filters.hasFocalPerson
@@ -345,21 +375,15 @@ export async function getAccomplishmentByOffice(quarter = 'q1', officeFilter = n
 
       const { data: rawRecords } = await recQuery
 
-      // Apply focal person filter client-side for reliability
-      let records = rawRecords || []
-      if (filters.hasFocalPerson === 'yes') {
-        records = records.filter(r => r.focal_person && r.focal_person.trim() !== '')
-      } else if (filters.hasFocalPerson === 'no') {
-        records = records.filter(r => !r.focal_person || r.focal_person.trim() === '')
-      }
+      const records = applyRecordFilters(rawRecords || [], filters)
 
       // Skip this office entirely if record-level filters are active and no records match
       if (hasRecordFilter && records.length === 0) {
         continue
       }
 
-      let totalPercentage = 0
-      let countWithTarget = 0
+      let totalAccomplishment = 0
+      let totalTarget = 0
 
       for (const record of records) {
         const target = parseFloat(record.quarterly_target)
@@ -367,19 +391,21 @@ export async function getAccomplishmentByOffice(quarter = 'q1', officeFilter = n
           const total = (parseFloat(record.month_1) || 0) +
                         (parseFloat(record.month_2) || 0) +
                         (parseFloat(record.month_3) || 0)
-          totalPercentage += (total / target) * 100
-          countWithTarget++
+          totalAccomplishment += total
+          totalTarget += target
         }
       }
 
-      const avgPercentage = countWithTarget > 0
-        ? Math.round(totalPercentage / countWithTarget)
+      const officePercentage = totalTarget > 0
+        ? Math.round((totalAccomplishment / totalTarget) * 100)
         : 0
 
       results.push({
         officeId: office.id,
         officeName: office.office_name,
-        percentage: avgPercentage
+        totalAccomplishment,
+        totalTarget,
+        percentage: officePercentage
       })
     }
 
@@ -407,22 +433,25 @@ export async function getMonthlyTrend(officeId = null, year = 2026, filters = {}
       // Get entries for specific office
       let query = supabase
         .from('bsc_entries')
-        .select('id')
+        .select('id, goal, perspective, strategic_objective, kpi')
         .eq('office_id', officeId)
 
-      if (filters.perspective) {
-        query = query.eq('perspective', filters.perspective)
-      }
-
       const { data: entries } = await query
-      entryIds = (entries || []).map(e => e.id)
+      entryIds = (entries || [])
+        .filter(entry =>
+          matchesContains(entry.goal, filters.goal) &&
+          matchesContains(entry.perspective, filters.perspective) &&
+          matchesContains(entry.strategic_objective, filters.strategicObjective) &&
+          matchesContains(entry.kpi, filters.kpi)
+        )
+        .map(e => e.id)
     } else {
       // Resolve office-level filters
       const filteredOfficeIds = await resolveFilteredOfficeIds(filters)
 
       let query = supabase
         .from('bsc_entries')
-        .select('id')
+        .select('id, goal, perspective, strategic_objective, kpi')
 
       if (filteredOfficeIds !== null && filteredOfficeIds.length > 0) {
         query = query.in('office_id', filteredOfficeIds)
@@ -430,12 +459,15 @@ export async function getMonthlyTrend(officeId = null, year = 2026, filters = {}
         return []
       }
 
-      if (filters.perspective) {
-        query = query.eq('perspective', filters.perspective)
-      }
-
       const { data: entries } = await query
-      entryIds = (entries || []).map(e => e.id)
+      entryIds = (entries || [])
+        .filter(entry =>
+          matchesContains(entry.goal, filters.goal) &&
+          matchesContains(entry.perspective, filters.perspective) &&
+          matchesContains(entry.strategic_objective, filters.strategicObjective) &&
+          matchesContains(entry.kpi, filters.kpi)
+        )
+        .map(e => e.id)
     }
 
     if (entryIds.length === 0) return []
@@ -452,13 +484,7 @@ export async function getMonthlyTrend(officeId = null, year = 2026, filters = {}
 
     const { data: rawRecords } = await recQuery
 
-    // Apply focal person filter client-side for reliability
-    let records = rawRecords || []
-    if (filters.hasFocalPerson === 'yes') {
-      records = records.filter(r => r.focal_person && r.focal_person.trim() !== '')
-    } else if (filters.hasFocalPerson === 'no') {
-      records = records.filter(r => !r.focal_person || r.focal_person.trim() === '')
-    }
+    const records = applyRecordFilters(rawRecords || [], filters)
 
     // Map quarters to months: q1 = Jan/Feb/Mar, q2 = Apr/May/Jun, etc.
     const monthlyData = new Array(12).fill(0)
@@ -514,6 +540,8 @@ export async function getGoalPerformance(quarter = null, filters = {}) {
         goal,
         office_id,
         perspective,
+        strategic_objective,
+        kpi,
         quarterly_records (
           quarter,
           quarterly_target,
@@ -531,10 +559,6 @@ export async function getGoalPerformance(quarter = null, filters = {}) {
       return { labels: [], datasets: [] }
     }
 
-    if (filters.perspective) {
-      entryQuery = entryQuery.eq('perspective', filters.perspective)
-    }
-
     const { data: entries, error } = await entryQuery
 
     if (error) throw error
@@ -542,7 +566,12 @@ export async function getGoalPerformance(quarter = null, filters = {}) {
     // Group by goal
     const goalMap = {}
 
-    for (const entry of (entries || [])) {
+    for (const entry of (entries || []).filter(entry =>
+      matchesContains(entry.goal, filters.goal) &&
+      matchesContains(entry.perspective, filters.perspective) &&
+      matchesContains(entry.strategic_objective, filters.strategicObjective) &&
+      matchesContains(entry.kpi, filters.kpi)
+    )) {
       if (!goalMap[entry.goal]) {
         goalMap[entry.goal] = { q1: [], q2: [], q3: [], q4: [] }
       }
@@ -558,10 +587,7 @@ export async function getGoalPerformance(quarter = null, filters = {}) {
         }
 
         // Apply focal person filter
-        if (filters.hasFocalPerson === 'yes' && (!record.focal_person || record.focal_person.trim() === '')) {
-          continue
-        }
-        if (filters.hasFocalPerson === 'no' && record.focal_person && record.focal_person.trim() !== '') {
+        if (applyRecordFilters([record], filters).length === 0) {
           continue
         }
 

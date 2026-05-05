@@ -22,6 +22,25 @@
         @change="handleQuarterChange"
       />
 
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        <AppCard>
+          <p class="text-sm text-gray-600">{{ currentQuarterLabel }} KPI Records</p>
+          <p class="text-2xl font-bold text-gray-900 mt-2">{{ officeAnalytics.totalRecords }}</p>
+        </AppCard>
+        <AppCard>
+          <p class="text-sm text-gray-600">Total {{ currentQuarterLabel }} Accomplishment</p>
+          <p class="text-2xl font-bold text-gray-900 mt-2">{{ officeAnalytics.totalAccomplishment }}</p>
+        </AppCard>
+        <AppCard>
+          <p class="text-sm text-gray-600">Total {{ currentQuarterLabel }} Target</p>
+          <p class="text-2xl font-bold text-gray-900 mt-2">{{ officeAnalytics.totalTarget }}</p>
+        </AppCard>
+        <AppCard>
+          <p class="text-sm text-gray-600">% Accomplishment vs {{ currentQuarterLabel }} Target</p>
+          <p class="text-2xl font-bold text-primary-600 mt-2">{{ officeAnalytics.percentageLabel }}</p>
+        </AppCard>
+      </div>
+
       <div class="space-y-6">
         <AppCard
           v-for="entry in officeEntries"
@@ -60,7 +79,7 @@
                   <p class="text-xl font-bold text-gray-900">{{ entry.totalAccomplishment || 0 }}</p>
                 </div>
                 <div>
-                  <span class="text-sm text-gray-600">% Accomplishment:</span>
+                  <span class="text-sm text-gray-600">% Accomplishment vs Target:</span>
                   <p class="text-xl font-bold text-primary-600">{{ entry.percentageAccomplishment || '—' }}</p>
                 </div>
               </div>
@@ -131,8 +150,8 @@
             <div class="pt-4 border-t border-gray-200">
               <FocalPersonInput
                 :model-value="entry.focalPerson"
-                :record-id="entry.id"
-                :is-loading="savingFocalPerson === entry.id"
+                :record-id="entry.recordId"
+                :is-loading="savingFocalPerson === entry.recordId"
                 @save="handleSaveFocalPerson"
               />
             </div>
@@ -154,15 +173,17 @@
           <AccomplishmentBarChart
             :labels="chartData.accomplishmentLabels"
             :data="chartData.accomplishmentData"
-            title="Accomplishment by KPI"
+            :title="`${adminStore.selectedOffice.officeName} ${currentQuarterLabel} KPI Accomplishment`"
           />
 
           <StatusDoughnutChart
             :data="chartData.statusDistribution"
+            :title="`${adminStore.selectedOffice.officeName} ${currentQuarterLabel} Status Distribution`"
           />
 
           <MonthlyTrendLineChart
             :data="chartData.monthlyTrend"
+            :title="`${adminStore.selectedOffice.officeName} Monthly Trend`"
           />
 
           <AccomplishmentGauge
@@ -185,7 +206,9 @@
           <OfficeComparisonChart
             :labels="chartData.comparisonLabels"
             :data="chartData.comparisonData"
-            :highlight-office-id="adminStore.selectedOffice.officeName"
+            :office-ids="chartData.comparisonOfficeIds"
+            :highlight-office-id="adminStore.selectedOffice.id"
+            :title="`${currentQuarterLabel} % Accomplishment vs Target by Office`"
           />
         </div>
       </AppCard>
@@ -225,11 +248,12 @@ const savingFocalPerson = ref(null)
 const officeEntries = ref([])
 
 const monthLabels = computed(() => getMonthLabels(currentQuarter.value))
+const currentQuarterLabel = computed(() => currentQuarter.value.toUpperCase())
 
-// Build the officeForPanel object with totalEntries and bscEntries
 const officeForPanel = computed(() => {
   const office = adminStore.selectedOffice
   if (!office) return {}
+
   return {
     ...office,
     totalEntries: office.entries?.length || 0,
@@ -250,7 +274,30 @@ const chartData = ref({
   monthlyTrend: [],
   currentQuarterPercentage: 0,
   comparisonLabels: [],
+  comparisonOfficeIds: [],
   comparisonData: []
+})
+
+const officeAnalytics = computed(() => {
+  const totalAccomplishment = officeEntries.value.reduce((sum, entry) => {
+    return sum + (parseFloat(entry.totalAccomplishment) || 0)
+  }, 0)
+
+  const totalTarget = officeEntries.value.reduce((sum, entry) => {
+    return sum + (parseFloat(entry.quarterlyTarget) || 0)
+  }, 0)
+
+  const percentage = totalTarget > 0
+    ? Math.round((totalAccomplishment / totalTarget) * 100)
+    : null
+
+  return {
+    totalRecords: officeEntries.value.filter(entry => entry.recordId).length,
+    totalAccomplishment,
+    totalTarget,
+    percentage,
+    percentageLabel: percentage === null ? '—' : `${percentage}%`
+  }
 })
 
 onMounted(async () => {
@@ -262,7 +309,6 @@ onMounted(async () => {
   }
 })
 
-// Watch quarter change to update entries and charts
 watch(currentQuarter, async () => {
   loadEntriesForQuarter()
   const officeId = route.params.officeId
@@ -277,23 +323,20 @@ const loadEntriesForQuarter = () => {
 
   const entries = office.entries || []
   const records = office.quarterlyRecords || []
+  const quarterRecords = records.filter(record => record.quarter === currentQuarter.value)
 
-  // Filter records for current quarter
-  const quarterRecords = records.filter(r => r.quarter === currentQuarter.value)
-
-  // Build entries with their quarterly data
-  officeEntries.value = entries.map(entry => {
-    const record = quarterRecords.find(r => r.entryId === entry.id)
-
+  officeEntries.value = entries.map((entry) => {
+    const record = quarterRecords.find(item => item.entryId === entry.id)
     const month1 = parseFloat(record?.month1) || 0
     const month2 = parseFloat(record?.month2) || 0
     const month3 = parseFloat(record?.month3) || 0
     const total = month1 + month2 + month3
     const target = parseFloat(record?.quarterlyTarget) || 0
-    const percentage = target > 0 ? Math.round((total / target) * 100) : 0
+    const percentage = target > 0 ? Math.round((total / target) * 100) : null
 
     return {
-      id: record?.id || entry.id,
+      id: entry.id,
+      recordId: record?.id || '',
       kpi: entry.kpi,
       goal: entry.goal,
       perspective: entry.perspective,
@@ -301,8 +344,8 @@ const loadEntriesForQuarter = () => {
       month1: record?.month1 || '',
       month2: record?.month2 || '',
       month3: record?.month3 || '',
-      totalAccomplishment: total || 0,
-      percentageAccomplishment: target > 0 ? `${percentage}%` : '—',
+      totalAccomplishment: total,
+      percentageAccomplishment: percentage === null ? '—' : `${percentage}%`,
       keyActivities: record?.keyActivities || '',
       mov: record?.mov || '',
       status: record?.status || '',
@@ -316,33 +359,33 @@ const loadEntriesForQuarter = () => {
 
 const loadChartData = async (officeId) => {
   try {
-    // Accomplishment by KPI for this office
     const entries = adminStore.selectedOffice?.entries || []
     const records = (adminStore.selectedOffice?.quarterlyRecords || [])
-      .filter(r => r.quarter === currentQuarter.value)
+      .filter(record => record.quarter === currentQuarter.value)
 
     const kpiLabels = []
     const kpiData = []
 
-    entries.forEach(entry => {
-      const record = records.find(r => r.entryId === entry.id)
+    entries.forEach((entry) => {
+      const record = records.find(item => item.entryId === entry.id)
       kpiLabels.push(entry.kpi)
 
-      if (record) {
-        const target = parseFloat(record.quarterlyTarget) || 0
-        const total = (parseFloat(record.month1) || 0) +
-                      (parseFloat(record.month2) || 0) +
-                      (parseFloat(record.month3) || 0)
-        kpiData.push(target > 0 ? Math.round((total / target) * 100) : 0)
-      } else {
+      if (!record) {
         kpiData.push(0)
+        return
       }
+
+      const target = parseFloat(record.quarterlyTarget) || 0
+      const total = (parseFloat(record.month1) || 0) +
+        (parseFloat(record.month2) || 0) +
+        (parseFloat(record.month3) || 0)
+
+      kpiData.push(target > 0 ? Math.round((total / target) * 100) : 0)
     })
 
     chartData.value.accomplishmentLabels = kpiLabels
     chartData.value.accomplishmentData = kpiData
 
-    // Status distribution for this office's records
     const statusDist = {
       notStarted: 0,
       ongoing: 0,
@@ -350,8 +393,9 @@ const loadChartData = async (officeId) => {
       delayed: 0,
       forValidation: 0
     }
-    records.forEach(r => {
-      switch (r.status) {
+
+    records.forEach((record) => {
+      switch (record.status) {
         case 'Not Started': statusDist.notStarted++; break
         case 'Ongoing': statusDist.ongoing++; break
         case 'Completed': statusDist.completed++; break
@@ -359,22 +403,17 @@ const loadChartData = async (officeId) => {
         case 'For Validation': statusDist.forValidation++; break
       }
     })
+
     chartData.value.statusDistribution = statusDist
+    chartData.value.monthlyTrend = await analyticsService.getMonthlyTrend(officeId)
 
-    // Monthly trend for this office
-    const trendData = await analyticsService.getMonthlyTrend(officeId)
-    chartData.value.monthlyTrend = trendData
-
-    // Current quarter percentage (average of all KPIs)
-    const totalPct = kpiData.reduce((a, b) => a + b, 0)
-    chartData.value.currentQuarterPercentage = kpiData.length > 0
-      ? Math.round(totalPct / kpiData.length)
-      : 0
-
-    // Comparison with other offices
     const comparisonData = await analyticsService.getAccomplishmentByOffice(currentQuarter.value)
-    chartData.value.comparisonLabels = comparisonData.map(o => o.officeName)
-    chartData.value.comparisonData = comparisonData.map(o => o.percentage)
+    const selectedOfficeSummary = comparisonData.find(item => item.officeId === officeId)
+
+    chartData.value.currentQuarterPercentage = selectedOfficeSummary?.percentage || 0
+    chartData.value.comparisonLabels = comparisonData.map(item => item.officeName)
+    chartData.value.comparisonOfficeIds = comparisonData.map(item => item.officeId)
+    chartData.value.comparisonData = comparisonData.map(item => item.percentage)
   } catch (error) {
     console.error('Error loading chart data:', error)
   }
@@ -390,8 +429,17 @@ const handleQuarterChange = (quarter) => {
 
 const handleSaveFocalPerson = async ({ recordId, focalPerson }) => {
   savingFocalPerson.value = recordId
+
   try {
     await adminStore.assignFocalPerson(recordId, focalPerson)
+
+    const officeId = route.params.officeId
+    if (officeId) {
+      await adminStore.fetchOfficeById(officeId)
+      loadEntriesForQuarter()
+      await loadChartData(officeId)
+    }
+
     toast.success('Focal person assigned successfully!')
   } catch (error) {
     toast.error('Failed to assign focal person')
@@ -408,6 +456,7 @@ const getStatusBadgeVariant = (status) => {
     'Delayed': 'delayed',
     'For Validation': 'for-validation'
   }
+
   return statusMap[status] || 'default'
 }
 </script>

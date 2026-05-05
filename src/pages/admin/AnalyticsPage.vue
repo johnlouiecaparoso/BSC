@@ -196,7 +196,10 @@ const filters = reactive({
   office: '',
   pillar: '',
   assignmentType: '',
+  goal: '',
   perspective: '',
+  strategicObjective: '',
+  kpi: '',
   status: '',
   hasFocalPerson: ''
 })

@@ -36,6 +36,10 @@ const props = defineProps({
     type: Array,
     default: () => []
   },
+  officeIds: {
+    type: Array,
+    default: () => []
+  },
   highlightOfficeId: {
     type: String,
     default: ''
@@ -50,7 +54,10 @@ const hasData = computed(() => props.labels.length > 0 && props.data.length > 0)
 
 const chartData = computed(() => {
   const backgroundColors = props.data.map((_, index) => {
-    if (props.highlightOfficeId && props.labels[index] === props.highlightOfficeId) {
+    const isHighlightedById = props.highlightOfficeId && props.officeIds[index] === props.highlightOfficeId
+    const isHighlightedByLabel = props.highlightOfficeId && props.labels[index] === props.highlightOfficeId
+
+    if (isHighlightedById || isHighlightedByLabel) {
       return '#3b82f6' // Primary blue for highlighted
     }
     return '#d1d5db' // Gray for others
@@ -70,7 +77,7 @@ const chartData = computed(() => {
   }
 })
 
-const chartOptions = {
+const chartOptions = computed(() => ({
   responsive: true,
   maintainAspectRatio: false,
   indexAxis: 'y',
@@ -97,7 +104,10 @@ const chartOptions = {
     y: {
       ticks: {
         font: function(context) {
-          if (props.highlightOfficeId && props.labels[context.index] === props.highlightOfficeId) {
+          const isHighlightedById = props.highlightOfficeId && props.officeIds[context.index] === props.highlightOfficeId
+          const isHighlightedByLabel = props.highlightOfficeId && props.labels[context.index] === props.highlightOfficeId
+
+          if (isHighlightedById || isHighlightedByLabel) {
             return {
               weight: 'bold'
             }
@@ -107,5 +117,5 @@ const chartOptions = {
       }
     }
   }
-}
+}))
 </script>

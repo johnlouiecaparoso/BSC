@@ -17,13 +17,21 @@
           <p class="font-semibold text-gray-900">{{ office.totalEntries || 0 }}</p>
         </div>
         <div>
-          <span class="text-gray-600">Completion:</span>
-          <p class="font-semibold text-green-600">{{ office.completion || 0 }}%</p>
+          <span class="text-gray-600">Q1 % vs Target:</span>
+          <p class="font-semibold text-green-600">{{ office.q1Percentage || 0 }}%</p>
+        </div>
+        <div>
+          <span class="text-gray-600">Total Q1 Accomplishment:</span>
+          <p class="font-semibold text-gray-900">{{ office.totalQ1Accomplishment || 0 }}</p>
+        </div>
+        <div>
+          <span class="text-gray-600">Total Q1 Target:</span>
+          <p class="font-semibold text-gray-900">{{ office.totalQ1Target || 0 }}</p>
         </div>
       </div>
 
       <div class="text-xs text-gray-500">
-        Last updated: {{ office.lastUpdated || 'Never' }}
+        Last updated: {{ formatDate(office.lastUpdated) }}
       </div>
 
       <div class="pt-4 border-t border-gray-200">
@@ -48,4 +56,13 @@ defineProps({
 })
 
 defineEmits(['view'])
+
+const formatDate = (value) => {
+  if (!value) return 'Never'
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+
+  return date.toLocaleDateString()
+}
 </script>

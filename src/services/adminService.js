@@ -1,5 +1,32 @@
 import { supabase } from '@/lib/supabase'
 
+const normalizeText = (value) => (value || '').toString().trim().toLowerCase()
+
+const matchesContains = (value, filterValue) => {
+  if (!filterValue) return true
+  return normalizeText(value).includes(normalizeText(filterValue))
+}
+
+const matchesRecordFilters = (record, filters = {}) => {
+  if (filters.quarter && record?.quarter !== filters.quarter) {
+    return false
+  }
+
+  if (filters.status && record?.status !== filters.status) {
+    return false
+  }
+
+  if (filters.hasFocalPerson === 'yes') {
+    return Boolean(record?.focalPerson && record.focalPerson.trim() !== '')
+  }
+
+  if (filters.hasFocalPerson === 'no') {
+    return !record?.focalPerson || record.focalPerson.trim() === ''
+  }
+
+  return true
+}
+
 /**
  * Admin Service
  * Full Supabase implementation for admin operations
@@ -12,8 +39,7 @@ import { supabase } from '@/lib/supabase'
  */
 export async function getAllOffices(filters = {}) {
   try {
-    // Get all approved offices with their profiles and entry counts
-    let query = supabase
+    const { data: offices, error: officesError } = await supabase
       .from('offices')
       .select(`
         id,
@@ -32,30 +58,150 @@ export async function getAllOffices(filters = {}) {
         )
       `)
       .eq('profiles.status', 'approved')
+      .order('created_at', { ascending: false })
 
-    // Apply filters
-    if (filters.office) {
-      query = query.ilike('office_name', `%${filters.office}%`)
+    if (officesError) throw officesError
+
+    const approvedOffices = offices || []
+    const officeIds = approvedOffices.map(office => office.id)
+
+    if (officeIds.length === 0) {
+      return []
     }
-    if (filters.pillar) {
-      query = query.ilike('pillar', `%${filters.pillar}%`)
+
+    const { data: entries, error: entriesError } = await supabase
+      .from('bsc_entries')
+      .select(`
+        id,
+        office_id,
+        goal,
+        perspective,
+        strategic_objective,
+        kpi
+      `)
+      .in('office_id', officeIds)
+
+    if (entriesError) throw entriesError
+
+    const allEntries = entries || []
+    const entryIds = allEntries.map(entry => entry.id)
+
+    let recordsByEntryId = {}
+
+    if (entryIds.length > 0) {
+      const { data: records, error: recordsError } = await supabase
+        .from('quarterly_records')
+        .select(`
+          id,
+          bsc_entry_id,
+          quarter,
+          quarterly_target,
+          month_1,
+          month_2,
+          month_3,
+          status,
+          focal_person
+        `)
+        .in('bsc_entry_id', entryIds)
+
+      if (recordsError) throw recordsError
+
+      recordsByEntryId = (records || []).reduce((acc, record) => {
+        if (!acc[record.bsc_entry_id]) {
+          acc[record.bsc_entry_id] = []
+        }
+
+        acc[record.bsc_entry_id].push({
+          id: record.id,
+          quarter: record.quarter,
+          quarterlyTarget: record.quarterly_target,
+          month1: record.month_1,
+          month2: record.month_2,
+          month3: record.month_3,
+          status: record.status,
+          focalPerson: record.focal_person
+        })
+
+        return acc
+      }, {})
     }
-    if (filters.assignmentType) {
-      query = query.ilike('assignment_type', `%${filters.assignmentType}%`)
-    }
 
-    const { data, error } = await query.order('created_at', { ascending: false })
+    const entriesByOfficeId = allEntries.reduce((acc, entry) => {
+      if (!acc[entry.office_id]) {
+        acc[entry.office_id] = []
+      }
 
-    if (error) throw error
+      acc[entry.office_id].push({
+        id: entry.id,
+        goal: entry.goal,
+        perspective: entry.perspective,
+        strategicObjective: entry.strategic_objective,
+        kpi: entry.kpi,
+        records: recordsByEntryId[entry.id] || []
+      })
 
-    // For each office, get entry count and quarterly summary
-    const officesWithStats = await Promise.all(
-      (data || []).map(async (office) => {
-        // Get BSC entries count
-        const { count: entryCount } = await supabase
-          .from('bsc_entries')
-          .select('id', { count: 'exact', head: true })
-          .eq('office_id', office.id)
+      return acc
+    }, {})
+
+    const hasEntryFilters = Boolean(
+      filters.goal ||
+      filters.perspective ||
+      filters.strategicObjective ||
+      filters.kpi
+    )
+    const hasRecordFilters = Boolean(
+      filters.quarter ||
+      filters.status ||
+      filters.hasFocalPerson
+    )
+
+    return approvedOffices
+      .filter((office) => {
+        if (!matchesContains(office.office_name, filters.office)) return false
+        if (!matchesContains(office.pillar, filters.pillar)) return false
+        if (!matchesContains(office.assignment_type, filters.assignmentType)) return false
+
+        const officeEntries = entriesByOfficeId[office.id] || []
+        const filteredEntries = officeEntries.filter(entry =>
+          matchesContains(entry.goal, filters.goal) &&
+          matchesContains(entry.perspective, filters.perspective) &&
+          matchesContains(entry.strategicObjective, filters.strategicObjective) &&
+          matchesContains(entry.kpi, filters.kpi)
+        )
+
+        if (hasEntryFilters && filteredEntries.length === 0) {
+          return false
+        }
+
+        if (hasRecordFilters) {
+          const entriesToCheck = hasEntryFilters ? filteredEntries : officeEntries
+          return entriesToCheck.some(entry =>
+            (entry.records || []).some(record => matchesRecordFilters(record, filters))
+          )
+        }
+
+        return true
+      })
+      .map((office) => {
+        const officeEntries = entriesByOfficeId[office.id] || []
+        const q1Records = officeEntries.flatMap(entry =>
+          (entry.records || []).filter(record => record.quarter === 'q1')
+        )
+
+        const totalQ1Accomplishment = q1Records.reduce((sum, record) => {
+          return sum +
+            (parseFloat(record.month1) || 0) +
+            (parseFloat(record.month2) || 0) +
+            (parseFloat(record.month3) || 0)
+        }, 0)
+
+        const totalQ1Target = q1Records.reduce((sum, record) => {
+          return sum + (parseFloat(record.quarterlyTarget) || 0)
+        }, 0)
+
+        const q1Percentage = totalQ1Target > 0
+          ? Math.round((totalQ1Accomplishment / totalQ1Target) * 100)
+          : 0
 
         return {
           id: office.id,
@@ -65,13 +211,15 @@ export async function getAllOffices(filters = {}) {
           registeredBy: office.profiles.full_name,
           email: office.profiles.email,
           userId: office.user_id,
-          totalEntries: entryCount || 0,
+          totalEntries: officeEntries.length,
+          totalQ1Accomplishment,
+          totalQ1Target,
+          q1Percentage,
+          completion: q1Percentage,
+          lastUpdated: office.updated_at || office.created_at,
           createdAt: office.created_at
         }
       })
-    )
-
-    return officesWithStats
   } catch (error) {
     console.error('Error fetching offices:', error)
     return []

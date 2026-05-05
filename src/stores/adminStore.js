@@ -13,6 +13,8 @@ export const useAdminStore = defineStore('admin', () => {
     assignmentType: '',
     goal: '',
     perspective: '',
+    strategicObjective: '',
+    kpi: '',
     quarter: '',
     status: '',
     hasFocalPerson: ''
@@ -111,6 +113,8 @@ export const useAdminStore = defineStore('admin', () => {
       assignmentType: '',
       goal: '',
       perspective: '',
+      strategicObjective: '',
+      kpi: '',
       quarter: '',
       status: '',
       hasFocalPerson: ''

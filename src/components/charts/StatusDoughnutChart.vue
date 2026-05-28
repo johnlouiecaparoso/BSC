@@ -1,6 +1,23 @@
 <template>
   <div class="w-full h-80">
-    <Doughnut v-if="hasData" :data="chartData" :options="chartOptions" />
+    <div v-if="hasData" class="h-full flex flex-col">
+      <div class="flex-1 min-h-0">
+        <Doughnut :data="chartData" :options="chartOptions" />
+      </div>
+      <div class="mt-4 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 px-4 text-sm text-gray-700">
+        <div
+          v-for="item in legendItems"
+          :key="item.label"
+          class="flex items-center gap-2"
+        >
+          <span
+            class="inline-block h-3.5 w-10 rounded-sm"
+            :style="{ backgroundColor: item.color }"
+          />
+          <span>{{ item.label }} ({{ item.value }})</span>
+        </div>
+      </div>
+    </div>
     <div v-else class="flex items-center justify-center h-full bg-gray-50 rounded-lg">
       <div class="text-center">
         <svg class="w-16 h-16 text-gray-400 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -71,18 +88,29 @@ const chartData = computed(() => ({
   ]
 }))
 
-const chartOptions = {
+const legendItems = computed(() => {
+  const labels = chartData.value.labels
+  const colors = chartData.value.datasets[0].backgroundColor
+  const values = chartData.value.datasets[0].data
+
+  return labels.map((label, index) => ({
+    label,
+    color: colors[index],
+    value: values[index] ?? 0
+  }))
+})
+
+const chartOptions = computed(() => ({
   responsive: true,
   maintainAspectRatio: false,
   plugins: {
     legend: {
-      display: true,
-      position: 'bottom'
+      display: false
     },
     title: {
       display: true,
       text: props.title
     }
   }
-}
+}))
 </script>

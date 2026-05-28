@@ -7,7 +7,28 @@ const matchesContains = (value, filterValue) => {
   return normalizeText(value).includes(normalizeText(filterValue))
 }
 
-const matchesRecordFilters = (record, filters = {}) => {
+const hasAssignedFocalPerson = (record) => {
+  const focalPerson = record?.focalPerson ?? record?.focal_person ?? ''
+  return focalPerson.toString().trim() !== ''
+}
+
+const matchesOfficeApprovalStatus = (profiles) => {
+  if (Array.isArray(profiles)) {
+    return profiles.some(profile => profile?.status === 'approved')
+  }
+
+  return profiles?.status === 'approved'
+}
+
+const getOfficeProfile = (profiles) => {
+  if (Array.isArray(profiles)) {
+    return profiles[0] || {}
+  }
+
+  return profiles || {}
+}
+
+const matchesQuarterAndStatusFilters = (record, filters = {}) => {
   if (filters.quarter && record?.quarter !== filters.quarter) {
     return false
   }
@@ -16,12 +37,42 @@ const matchesRecordFilters = (record, filters = {}) => {
     return false
   }
 
+  return true
+}
+
+const matchesRecordFilters = (record, filters = {}) => {
+  if (!matchesQuarterAndStatusFilters(record, filters)) {
+    return false
+  }
+
   if (filters.hasFocalPerson === 'yes') {
-    return Boolean(record?.focalPerson && record.focalPerson.trim() !== '')
+    return hasAssignedFocalPerson(record)
   }
 
   if (filters.hasFocalPerson === 'no') {
-    return !record?.focalPerson || record.focalPerson.trim() === ''
+    return !hasAssignedFocalPerson(record)
+  }
+
+  return true
+}
+
+const matchesOfficeFocalPersonFilter = (records = [], filters = {}) => {
+  if (!filters.hasFocalPerson) {
+    return true
+  }
+
+  const relevantRecords = records.filter(record => matchesQuarterAndStatusFilters(record, filters))
+
+  if (relevantRecords.length === 0) {
+    return false
+  }
+
+  if (filters.hasFocalPerson === 'yes') {
+    return relevantRecords.some(record => hasAssignedFocalPerson(record))
+  }
+
+  if (filters.hasFocalPerson === 'no') {
+    return relevantRecords.every(record => !hasAssignedFocalPerson(record))
   }
 
   return true
@@ -57,12 +108,13 @@ export async function getAllOffices(filters = {}) {
           contact_number
         )
       `)
-      .eq('profiles.status', 'approved')
       .order('created_at', { ascending: false })
 
     if (officesError) throw officesError
 
-    const approvedOffices = offices || []
+    const approvedOffices = (offices || []).filter(office =>
+      matchesOfficeApprovalStatus(office.profiles)
+    )
     const officeIds = approvedOffices.map(office => office.id)
 
     if (officeIds.length === 0) {
@@ -149,11 +201,7 @@ export async function getAllOffices(filters = {}) {
       filters.strategicObjective ||
       filters.kpi
     )
-    const hasRecordFilters = Boolean(
-      filters.quarter ||
-      filters.status ||
-      filters.hasFocalPerson
-    )
+    const hasRecordFilters = Boolean(filters.quarter || filters.status || filters.hasFocalPerson)
 
     return approvedOffices
       .filter((office) => {
@@ -175,6 +223,12 @@ export async function getAllOffices(filters = {}) {
 
         if (hasRecordFilters) {
           const entriesToCheck = hasEntryFilters ? filteredEntries : officeEntries
+          const relevantRecords = entriesToCheck.flatMap(entry => entry.records || [])
+
+          if (!matchesOfficeFocalPersonFilter(relevantRecords, filters)) {
+            return false
+          }
+
           return entriesToCheck.some(entry =>
             (entry.records || []).some(record => matchesRecordFilters(record, filters))
           )
@@ -183,9 +237,30 @@ export async function getAllOffices(filters = {}) {
         return true
       })
       .map((office) => {
+        const profile = getOfficeProfile(office.profiles)
         const officeEntries = entriesByOfficeId[office.id] || []
-        const q1Records = officeEntries.flatMap(entry =>
-          (entry.records || []).filter(record => record.quarter === 'q1')
+        const filteredEntries = officeEntries
+          .filter(entry =>
+            matchesContains(entry.goal, filters.goal) &&
+            matchesContains(entry.perspective, filters.perspective) &&
+            matchesContains(entry.strategicObjective, filters.strategicObjective) &&
+            matchesContains(entry.kpi, filters.kpi)
+          )
+          .map((entry) => ({
+            ...entry,
+            filteredRecords: hasRecordFilters
+              ? (entry.records || []).filter(record => matchesRecordFilters(record, filters))
+              : (entry.records || [])
+          }))
+          .filter(entry => !hasRecordFilters || entry.filteredRecords.length > 0)
+
+        const entriesForSummary = hasEntryFilters || hasRecordFilters ? filteredEntries : officeEntries.map((entry) => ({
+          ...entry,
+          filteredRecords: entry.records || []
+        }))
+
+        const q1Records = entriesForSummary.flatMap(entry =>
+          (entry.filteredRecords || []).filter(record => record.quarter === 'q1')
         )
 
         const totalQ1Accomplishment = q1Records.reduce((sum, record) => {
@@ -208,10 +283,10 @@ export async function getAllOffices(filters = {}) {
           officeName: office.office_name,
           pillar: office.pillar || '',
           assignmentType: office.assignment_type || '',
-          registeredBy: office.profiles.full_name,
-          email: office.profiles.email,
+          registeredBy: profile.full_name || '',
+          email: profile.email || '',
           userId: office.user_id,
-          totalEntries: officeEntries.length,
+          totalEntries: entriesForSummary.length,
           totalQ1Accomplishment,
           totalQ1Target,
           q1Percentage,
@@ -264,19 +339,23 @@ export async function getOfficeById(officeId) {
 
     if (entriesError) throw entriesError
 
-    // Get quarterly records for all entries
+    // Get quarterly records for all entries - this is efficient and ensures all data is loaded
     const entryIds = (entries || []).map(e => e.id)
     let quarterlyRecords = []
 
     if (entryIds.length > 0) {
+      // Fetch all quarterly records for all quarters at once
       const { data: records, error: recordsError } = await supabase
         .from('quarterly_records')
         .select('*')
         .in('bsc_entry_id', entryIds)
+        .order('quarter', { ascending: true })
 
       if (recordsError) throw recordsError
       quarterlyRecords = records || []
     }
+
+    const profile = getOfficeProfile(office.profiles)
 
     return {
       id: office.id,
@@ -284,10 +363,10 @@ export async function getOfficeById(officeId) {
       pillar: office.pillar || '',
       assignmentType: office.assignment_type || '',
       userId: office.user_id,
-      registeredBy: office.profiles?.full_name || '',
-      email: office.profiles?.email || '',
-      contactNumber: office.profiles?.contact_number || '',
-      status: office.profiles?.status || '',
+      registeredBy: profile.full_name || '',
+      email: profile.email || '',
+      contactNumber: profile.contact_number || '',
+      status: profile.status || '',
       createdAt: office.created_at,
       entries: (entries || []).map(entry => ({
         id: entry.id,
@@ -296,22 +375,23 @@ export async function getOfficeById(officeId) {
         strategicObjective: entry.strategic_objective,
         kpi: entry.kpi,
         target2026: entry.target_2026,
+        quarter: entry.quarter || 'q1',
         createdAt: entry.created_at
       })),
       quarterlyRecords: quarterlyRecords.map(r => ({
         id: r.id,
         entryId: r.bsc_entry_id,
         quarter: r.quarter,
-        quarterlyTarget: r.quarterly_target,
-        month1: r.month_1,
-        month2: r.month_2,
-        month3: r.month_3,
-        keyActivities: r.key_activities,
-        mov: r.mov,
-        status: r.status,
-        issues: r.issues,
-        assistance: r.assistance,
-        focalPerson: r.focal_person
+        quarterlyTarget: r.quarterly_target !== null ? r.quarterly_target : 0,
+        month1: r.month_1 !== null ? r.month_1 : 0,
+        month2: r.month_2 !== null ? r.month_2 : 0,
+        month3: r.month_3 !== null ? r.month_3 : 0,
+        keyActivities: r.key_activities || '',
+        mov: r.mov || '',
+        status: r.status || '',
+        issues: r.issues || '',
+        assistance: r.assistance || '',
+        focalPerson: r.focal_person || ''
       }))
     }
   } catch (error) {

@@ -279,12 +279,21 @@ const chartData = ref({
 })
 
 const officeAnalytics = computed(() => {
-  const totalAccomplishment = officeEntries.value.reduce((sum, entry) => {
-    return sum + (parseFloat(entry.totalAccomplishment) || 0)
+  // Only count entries that have records for the current quarter
+  const validEntries = officeEntries.value.filter(entry => entry.recordId)
+  
+  const totalAccomplishment = validEntries.reduce((sum, entry) => {
+    const val = typeof entry.totalAccomplishment === 'number' 
+      ? entry.totalAccomplishment 
+      : parseFloat(entry.totalAccomplishment) || 0
+    return sum + (isNaN(val) ? 0 : val)
   }, 0)
 
-  const totalTarget = officeEntries.value.reduce((sum, entry) => {
-    return sum + (parseFloat(entry.quarterlyTarget) || 0)
+  const totalTarget = validEntries.reduce((sum, entry) => {
+    const val = typeof entry.quarterlyTarget === 'number'
+      ? entry.quarterlyTarget
+      : parseFloat(entry.quarterlyTarget) || 0
+    return sum + (isNaN(val) ? 0 : val)
   }, 0)
 
   const percentage = totalTarget > 0
@@ -292,9 +301,9 @@ const officeAnalytics = computed(() => {
     : null
 
   return {
-    totalRecords: officeEntries.value.filter(entry => entry.recordId).length,
-    totalAccomplishment,
-    totalTarget,
+    totalRecords: validEntries.length,
+    totalAccomplishment: Math.round(totalAccomplishment * 100) / 100, // Round to 2 decimals
+    totalTarget: Math.round(totalTarget * 100) / 100, // Round to 2 decimals
     percentage,
     percentageLabel: percentage === null ? '—' : `${percentage}%`
   }
@@ -327,12 +336,16 @@ const loadEntriesForQuarter = () => {
 
   officeEntries.value = entries.map((entry) => {
     const record = quarterRecords.find(item => item.entryId === entry.id)
-    const month1 = parseFloat(record?.month1) || 0
-    const month2 = parseFloat(record?.month2) || 0
-    const month3 = parseFloat(record?.month3) || 0
+    
+    // Ensure all values are properly parsed as numbers
+    const month1 = record ? (typeof record.month1 === 'number' ? record.month1 : parseFloat(record.month1) || 0) : 0
+    const month2 = record ? (typeof record.month2 === 'number' ? record.month2 : parseFloat(record.month2) || 0) : 0
+    const month3 = record ? (typeof record.month3 === 'number' ? record.month3 : parseFloat(record.month3) || 0) : 0
     const total = month1 + month2 + month3
-    const target = parseFloat(record?.quarterlyTarget) || 0
-    const percentage = target > 0 ? Math.round((total / target) * 100) : null
+    const target = record ? (typeof record.quarterlyTarget === 'number' ? record.quarterlyTarget : parseFloat(record.quarterlyTarget) || 0) : 0
+    
+    // Calculate percentage only if record exists and target > 0
+    const percentage = record && target > 0 ? Math.round((total / target) * 100) : null
 
     return {
       id: entry.id,
@@ -340,12 +353,12 @@ const loadEntriesForQuarter = () => {
       kpi: entry.kpi,
       goal: entry.goal,
       perspective: entry.perspective,
-      quarterlyTarget: record?.quarterlyTarget || '',
-      month1: record?.month1 || '',
-      month2: record?.month2 || '',
-      month3: record?.month3 || '',
-      totalAccomplishment: total,
-      percentageAccomplishment: percentage === null ? '—' : `${percentage}%`,
+      quarterlyTarget: record ? target : '', // Show empty if no record
+      month1: record ? month1 : '', // Show empty if no record
+      month2: record ? month2 : '', // Show empty if no record
+      month3: record ? month3 : '', // Show empty if no record
+      totalAccomplishment: record ? total : 0,
+      percentageAccomplishment: !record || percentage === null ? '—' : `${percentage}%`,
       keyActivities: record?.keyActivities || '',
       mov: record?.mov || '',
       status: record?.status || '',
@@ -366,6 +379,7 @@ const loadChartData = async (officeId) => {
     const kpiLabels = []
     const kpiData = []
 
+    // Process only entries that have records for current quarter
     entries.forEach((entry) => {
       const record = records.find(item => item.entryId === entry.id)
       kpiLabels.push(entry.kpi)
@@ -375,10 +389,14 @@ const loadChartData = async (officeId) => {
         return
       }
 
-      const target = parseFloat(record.quarterlyTarget) || 0
-      const total = (parseFloat(record.month1) || 0) +
-        (parseFloat(record.month2) || 0) +
-        (parseFloat(record.month3) || 0)
+      const target = typeof record.quarterlyTarget === 'number' 
+        ? record.quarterlyTarget 
+        : parseFloat(record.quarterlyTarget) || 0
+      
+      const month1 = typeof record.month1 === 'number' ? record.month1 : parseFloat(record.month1) || 0
+      const month2 = typeof record.month2 === 'number' ? record.month2 : parseFloat(record.month2) || 0
+      const month3 = typeof record.month3 === 'number' ? record.month3 : parseFloat(record.month3) || 0
+      const total = month1 + month2 + month3
 
       kpiData.push(target > 0 ? Math.round((total / target) * 100) : 0)
     })
@@ -405,8 +423,11 @@ const loadChartData = async (officeId) => {
     })
 
     chartData.value.statusDistribution = statusDist
-    chartData.value.monthlyTrend = await analyticsService.getMonthlyTrend(officeId)
+    
+    // Fetch monthly trend with current quarter context
+    chartData.value.monthlyTrend = await analyticsService.getMonthlyTrend(officeId, 2026, {})
 
+    // Get comparison data for current quarter
     const comparisonData = await analyticsService.getAccomplishmentByOffice(currentQuarter.value)
     const selectedOfficeSummary = comparisonData.find(item => item.officeId === officeId)
 

@@ -7,6 +7,39 @@ const matchesContains = (value, filterValue) => {
   return normalizeText(value).includes(normalizeText(filterValue))
 }
 
+const hasAssignedFocalPerson = (record) => {
+  const focalPerson = record?.focal_person ?? record?.focalPerson ?? ''
+  return focalPerson.toString().trim() !== ''
+}
+
+const matchesOfficeApprovalStatus = (profiles) => {
+  if (Array.isArray(profiles)) {
+    return profiles.some(profile => profile?.status === 'approved')
+  }
+
+  return profiles?.status === 'approved'
+}
+
+const matchesOfficeFocalPersonFilter = (records = [], filters = {}) => {
+  if (!filters.hasFocalPerson) {
+    return true
+  }
+
+  if (records.length === 0) {
+    return false
+  }
+
+  if (filters.hasFocalPerson === 'yes') {
+    return records.some(record => hasAssignedFocalPerson(record))
+  }
+
+  if (filters.hasFocalPerson === 'no') {
+    return records.every(record => !hasAssignedFocalPerson(record))
+  }
+
+  return true
+}
+
 const applyRecordFilters = (records = [], filters = {}) => {
   return records.filter((record) => {
     if (filters.status && record.status !== filters.status) {
@@ -14,11 +47,11 @@ const applyRecordFilters = (records = [], filters = {}) => {
     }
 
     if (filters.hasFocalPerson === 'yes') {
-      return Boolean(record.focal_person && record.focal_person.trim() !== '')
+      return hasAssignedFocalPerson(record)
     }
 
     if (filters.hasFocalPerson === 'no') {
-      return !record.focal_person || record.focal_person.trim() === ''
+      return !hasAssignedFocalPerson(record)
     }
 
     return true
@@ -157,7 +190,7 @@ async function resolveFilteredOfficeIds(filters = {}) {
   const { data, error } = await query
   if (error) throw error
 
-  let offices = (data || []).filter(o => o.profiles?.status === 'approved')
+  let offices = (data || []).filter(o => matchesOfficeApprovalStatus(o.profiles))
 
   if (filters.office) {
     offices = offices.filter(o =>
@@ -309,7 +342,7 @@ export async function getAccomplishmentByOffice(quarter = 'q1', officeFilter = n
     const results = []
 
     for (const office of (offices || [])) {
-      if (office?.profiles?.status !== 'approved') {
+      if (!matchesOfficeApprovalStatus(office.profiles)) {
         continue
       }
 
@@ -356,12 +389,18 @@ export async function getAccomplishmentByOffice(quarter = 'q1', officeFilter = n
       if (entryIds.length === 0) {
         // Only include offices with no entries when no record-level filter is active
         if (!hasRecordFilter) {
-          results.push({ officeName: office.office_name, percentage: 0 })
+          results.push({ 
+            officeId: office.id,
+            officeName: office.office_name, 
+            totalAccomplishment: 0,
+            totalTarget: 0,
+            percentage: 0 
+          })
         }
         continue
       }
 
-      // Get quarterly records
+      // Get quarterly records - must match quarter
       let recQuery = supabase
         .from('quarterly_records')
         .select('quarterly_target, month_1, month_2, month_3, status, focal_person')
@@ -375,6 +414,10 @@ export async function getAccomplishmentByOffice(quarter = 'q1', officeFilter = n
 
       const { data: rawRecords } = await recQuery
 
+      if (!matchesOfficeFocalPersonFilter(rawRecords || [], filters)) {
+        continue
+      }
+
       const records = applyRecordFilters(rawRecords || [], filters)
 
       // Skip this office entirely if record-level filters are active and no records match
@@ -386,11 +429,23 @@ export async function getAccomplishmentByOffice(quarter = 'q1', officeFilter = n
       let totalTarget = 0
 
       for (const record of records) {
-        const target = parseFloat(record.quarterly_target)
+        // Safely parse numeric values - handle both null and string values
+        const target = record.quarterly_target !== null && record.quarterly_target !== undefined 
+          ? parseFloat(record.quarterly_target) 
+          : 0
+        
         if (target && target > 0) {
-          const total = (parseFloat(record.month_1) || 0) +
-                        (parseFloat(record.month_2) || 0) +
-                        (parseFloat(record.month_3) || 0)
+          const month1 = record.month_1 !== null && record.month_1 !== undefined 
+            ? parseFloat(record.month_1) 
+            : 0
+          const month2 = record.month_2 !== null && record.month_2 !== undefined 
+            ? parseFloat(record.month_2) 
+            : 0
+          const month3 = record.month_3 !== null && record.month_3 !== undefined 
+            ? parseFloat(record.month_3) 
+            : 0
+          
+          const total = month1 + month2 + month3
           totalAccomplishment += total
           totalTarget += target
         }
@@ -491,7 +546,11 @@ export async function getMonthlyTrend(officeId = null, year = 2026, filters = {}
     const monthlyCounts = new Array(12).fill(0)
 
     for (const record of records) {
-      const target = parseFloat(record.quarterly_target) || 0
+      // Safely parse numeric values - handle both null and string values
+      const target = record.quarterly_target !== null && record.quarterly_target !== undefined
+        ? parseFloat(record.quarterly_target)
+        : 0
+      
       if (target <= 0) continue
 
       let baseMonth = 0
@@ -500,11 +559,12 @@ export async function getMonthlyTrend(officeId = null, year = 2026, filters = {}
         case 'q2': baseMonth = 3; break
         case 'q3': baseMonth = 6; break
         case 'q4': baseMonth = 9; break
+        default: continue
       }
 
       const months = [record.month_1, record.month_2, record.month_3]
       months.forEach((val, i) => {
-        const monthVal = parseFloat(val) || 0
+        const monthVal = val !== null && val !== undefined ? parseFloat(val) : 0
         if (monthVal > 0) {
           monthlyData[baseMonth + i] += (monthVal / target) * 100
           monthlyCounts[baseMonth + i]++

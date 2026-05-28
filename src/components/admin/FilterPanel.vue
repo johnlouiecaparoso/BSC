@@ -83,7 +83,7 @@
 </template>
 
 <script setup>
-import { reactive, watch, computed, onMounted, ref } from 'vue'
+import { reactive, watch, computed, onMounted, onActivated, ref } from 'vue'
 import AppCard from '@/components/common/AppCard.vue'
 import AppSelect from '@/components/common/AppSelect.vue'
 import AppButton from '@/components/common/AppButton.vue'
@@ -102,7 +102,19 @@ const emit = defineEmits(['update:filters', 'clear'])
 const officesList = ref([])
 const bscEntries = ref([])
 
+const matchesOfficeApprovalStatus = (profiles) => {
+  if (Array.isArray(profiles)) {
+    return profiles.some(profile => profile?.status === 'approved')
+  }
+
+  return profiles?.status === 'approved'
+}
+
 onMounted(async () => {
+  await loadOffices()
+})
+
+onActivated(async () => {
   await loadOffices()
 })
 
@@ -124,7 +136,7 @@ const loadOffices = async () => {
     if (error) throw error
 
     // Only include approved offices
-    officesList.value = (data || []).filter(o => o.profiles?.status === 'approved')
+    officesList.value = (data || []).filter(o => matchesOfficeApprovalStatus(o.profiles))
     await loadBscEntries()
   } catch (err) {
     console.error('Error loading offices for filter:', err)
@@ -190,12 +202,15 @@ const assignmentTypeOptions = computed(() => {
     : ['Strategic', 'Core', 'Support'].map(t => ({ value: t, label: t }))
 })
 
-const perspectiveOptions = [
-  { value: 'Stakeholders', label: 'Stakeholders' },
-  { value: 'Process Excellence', label: 'Process Excellence' },
-  { value: 'Talents, Learning & Growth', label: 'Talents, Learning & Growth' },
-  { value: 'Financial', label: 'Financial' }
-]
+const perspectiveOptions = computed(() => {
+  const perspectives = [...new Set(
+    bscEntries.value
+      .map(entry => entry.perspective)
+      .filter(Boolean)
+  )]
+
+  return perspectives.map(perspective => ({ value: perspective, label: perspective }))
+})
 
 const goalOptions = computed(() => {
   const goals = [...new Set(

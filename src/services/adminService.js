@@ -1,4 +1,6 @@
 import { supabase } from '@/lib/supabase'
+import { toNumber } from '@/utils/computeAccomplishment'
+import { getCurrentQuarter, getCurrentYear } from '@/utils/quarterHelpers'
 
 const normalizeText = (value) => (value || '').toString().trim().toLowerCase()
 
@@ -84,12 +86,18 @@ const matchesOfficeFocalPersonFilter = (records = [], filters = {}) => {
  */
 
 /**
- * Get all offices with optional filters
- * @param {object} filters - {pillar, assignmentType, goal, perspective, quarter, status, hasFocalPerson}
+ * Get all offices with optional filters.
+ * The accomplishment summary reflects `filters.quarter` (falling back to the
+ * current calendar quarter) rather than a hardcoded Q1.
+ * @param {object} filters - {office, pillar, assignmentType, goal, perspective,
+ *   strategicObjective, kpi, quarter, year, status, hasFocalPerson}
  * @returns {Promise<array>}
  */
 export async function getAllOffices(filters = {}) {
   try {
+    const summaryQuarter = filters.quarter || getCurrentQuarter()
+    const year = filters.year ?? getCurrentYear()
+
     const { data: offices, error: officesError } = await supabase
       .from('offices')
       .select(`
@@ -123,15 +131,9 @@ export async function getAllOffices(filters = {}) {
 
     const { data: entries, error: entriesError } = await supabase
       .from('bsc_entries')
-      .select(`
-        id,
-        office_id,
-        goal,
-        perspective,
-        strategic_objective,
-        kpi
-      `)
+      .select('id, office_id, goal, perspective, strategic_objective, kpi, target_value, target_year')
       .in('office_id', officeIds)
+      .eq('target_year', year)
 
     if (entriesError) throw entriesError
 
@@ -147,6 +149,7 @@ export async function getAllOffices(filters = {}) {
           id,
           bsc_entry_id,
           quarter,
+          year,
           quarterly_target,
           month_1,
           month_2,
@@ -155,6 +158,7 @@ export async function getAllOffices(filters = {}) {
           focal_person
         `)
         .in('bsc_entry_id', entryIds)
+        .eq('year', year)
 
       if (recordsError) throw recordsError
 
@@ -166,6 +170,7 @@ export async function getAllOffices(filters = {}) {
         acc[record.bsc_entry_id].push({
           id: record.id,
           quarter: record.quarter,
+          year: record.year,
           quarterlyTarget: record.quarterly_target,
           month1: record.month_1,
           month2: record.month_2,
@@ -189,6 +194,8 @@ export async function getAllOffices(filters = {}) {
         perspective: entry.perspective,
         strategicObjective: entry.strategic_objective,
         kpi: entry.kpi,
+        targetValue: entry.target_value,
+        targetYear: entry.target_year,
         records: recordsByEntryId[entry.id] || []
       })
 
@@ -254,28 +261,30 @@ export async function getAllOffices(filters = {}) {
           }))
           .filter(entry => !hasRecordFilters || entry.filteredRecords.length > 0)
 
-        const entriesForSummary = hasEntryFilters || hasRecordFilters ? filteredEntries : officeEntries.map((entry) => ({
-          ...entry,
-          filteredRecords: entry.records || []
-        }))
+        const entriesForSummary = hasEntryFilters || hasRecordFilters
+          ? filteredEntries
+          : officeEntries.map((entry) => ({ ...entry, filteredRecords: entry.records || [] }))
 
-        const q1Records = entriesForSummary.flatMap(entry =>
-          (entry.filteredRecords || []).filter(record => record.quarter === 'q1')
+        // Summarise the quarter the admin is actually looking at. Previously this
+        // always filtered to 'q1', so selecting any other quarter zeroed every card.
+        const summaryRecords = entriesForSummary.flatMap(entry =>
+          (entry.filteredRecords || []).filter(record => record.quarter === summaryQuarter)
         )
 
-        const totalQ1Accomplishment = q1Records.reduce((sum, record) => {
-          return sum +
-            (parseFloat(record.month1) || 0) +
-            (parseFloat(record.month2) || 0) +
-            (parseFloat(record.month3) || 0)
-        }, 0)
+        let totalAccomplishment = 0
+        let totalTarget = 0
 
-        const totalQ1Target = q1Records.reduce((sum, record) => {
-          return sum + (parseFloat(record.quarterlyTarget) || 0)
-        }, 0)
+        for (const record of summaryRecords) {
+          const target = toNumber(record.quarterlyTarget)
 
-        const q1Percentage = totalQ1Target > 0
-          ? Math.round((totalQ1Accomplishment / totalQ1Target) * 100)
+          if (target > 0) {
+            totalAccomplishment += toNumber(record.month1) + toNumber(record.month2) + toNumber(record.month3)
+            totalTarget += target
+          }
+        }
+
+        const percentage = totalTarget > 0
+          ? Math.round((totalAccomplishment / totalTarget) * 100)
           : 0
 
         return {
@@ -287,10 +296,12 @@ export async function getAllOffices(filters = {}) {
           email: profile.email || '',
           userId: office.user_id,
           totalEntries: entriesForSummary.length,
-          totalQ1Accomplishment,
-          totalQ1Target,
-          q1Percentage,
-          completion: q1Percentage,
+          summaryQuarter,
+          summaryYear: year,
+          totalAccomplishment,
+          totalTarget,
+          percentage,
+          completion: percentage,
           lastUpdated: office.updated_at || office.created_at,
           createdAt: office.created_at
         }
@@ -304,9 +315,10 @@ export async function getAllOffices(filters = {}) {
 /**
  * Get office details by ID (office UUID, not user UUID)
  * @param {string} officeId
+ * @param {object} [options] - {year} to scope entries and records
  * @returns {Promise<object|null>}
  */
-export async function getOfficeById(officeId) {
+export async function getOfficeById(officeId, { year = null } = {}) {
   try {
     const { data: office, error: officeError } = await supabase
       .from('offices')
@@ -326,30 +338,41 @@ export async function getOfficeById(officeId) {
         )
       `)
       .eq('id', officeId)
-      .single()
+      .maybeSingle()
 
     if (officeError) throw officeError
+    if (!office) return null
 
-    // Get BSC entries for this office
-    const { data: entries, error: entriesError } = await supabase
+    let entriesQuery = supabase
       .from('bsc_entries')
       .select('*')
       .eq('office_id', officeId)
       .order('created_at', { ascending: true })
 
+    if (year !== null && year !== undefined) {
+      entriesQuery = entriesQuery.eq('target_year', year)
+    }
+
+    const { data: entries, error: entriesError } = await entriesQuery
+
     if (entriesError) throw entriesError
 
-    // Get quarterly records for all entries - this is efficient and ensures all data is loaded
     const entryIds = (entries || []).map(e => e.id)
     let quarterlyRecords = []
 
     if (entryIds.length > 0) {
-      // Fetch all quarterly records for all quarters at once
-      const { data: records, error: recordsError } = await supabase
+      let recordsQuery = supabase
         .from('quarterly_records')
         .select('*')
         .in('bsc_entry_id', entryIds)
+        .order('year', { ascending: true })
         .order('quarter', { ascending: true })
+
+      if (year !== null && year !== undefined) {
+        recordsQuery = recordsQuery.eq('year', year)
+      }
+
+      const { data: records, error: recordsError } = await recordsQuery
 
       if (recordsError) throw recordsError
       quarterlyRecords = records || []
@@ -374,24 +397,28 @@ export async function getOfficeById(officeId) {
         perspective: entry.perspective,
         strategicObjective: entry.strategic_objective,
         kpi: entry.kpi,
-        target2026: entry.target_2026,
-        quarter: entry.quarter || 'q1',
+        targetValue: entry.target_value,
+        targetYear: entry.target_year,
         createdAt: entry.created_at
       })),
       quarterlyRecords: quarterlyRecords.map(r => ({
         id: r.id,
         entryId: r.bsc_entry_id,
         quarter: r.quarter,
-        quarterlyTarget: r.quarterly_target !== null ? r.quarterly_target : 0,
-        month1: r.month_1 !== null ? r.month_1 : 0,
-        month2: r.month_2 !== null ? r.month_2 : 0,
-        month3: r.month_3 !== null ? r.month_3 : 0,
+        year: r.year,
+        // Null means "not reported" and must stay distinguishable from a
+        // reported zero, so these are no longer coerced to 0.
+        quarterlyTarget: r.quarterly_target,
+        month1: r.month_1,
+        month2: r.month_2,
+        month3: r.month_3,
         keyActivities: r.key_activities || '',
         mov: r.mov || '',
         status: r.status || '',
         issues: r.issues || '',
         assistance: r.assistance || '',
-        focalPerson: r.focal_person || ''
+        focalPerson: r.focal_person || '',
+        updatedAt: r.updated_at
       }))
     }
   } catch (error) {
@@ -469,14 +496,19 @@ export async function rejectOffice(userId, reason = '') {
  */
 export async function assignFocalPerson(recordId, focalPerson) {
   try {
-    const { error } = await supabase
+    const { error, count } = await supabase
       .from('quarterly_records')
-      .update({
-        focal_person: focalPerson
-      })
+      .update({ focal_person: focalPerson }, { count: 'exact' })
       .eq('id', recordId)
 
     if (error) throw error
+
+    if (count === 0) {
+      return {
+        success: false,
+        message: 'Failed to assign focal person. Record may not exist or permission was denied.'
+      }
+    }
 
     return {
       success: true,
@@ -506,33 +538,101 @@ export async function getPendingApprovals() {
 
     if (profileError) throw profileError
 
-    // For each pending profile, get their office info
-    const approvals = await Promise.all(
-      (pendingProfiles || []).map(async (profile) => {
-        const { data: office } = await supabase
-          .from('offices')
-          .select('office_name, pillar, assignment_type')
-          .eq('user_id', profile.id)
-          .maybeSingle()
+    const profiles = pendingProfiles || []
 
-        return {
-          id: profile.id,
-          fullName: profile.full_name,
-          email: profile.email,
-          contactNumber: profile.contact_number,
-          registeredBy: profile.full_name,
-          officeName: office?.office_name || 'Not specified',
-          pillar: office?.pillar || '',
-          assignmentType: office?.assignment_type || '',
-          createdAt: profile.created_at,
-          status: profile.status
-        }
-      })
-    )
+    if (profiles.length === 0) return []
 
-    return approvals
+    // One query for every pending user's office rather than one per user.
+    const { data: offices, error: officesError } = await supabase
+      .from('offices')
+      .select('user_id, office_name, pillar, assignment_type')
+      .in('user_id', profiles.map(p => p.id))
+
+    if (officesError) throw officesError
+
+    const officeByUserId = (offices || []).reduce((acc, office) => {
+      if (!acc[office.user_id]) acc[office.user_id] = office
+      return acc
+    }, {})
+
+    return profiles.map((profile) => {
+      const office = officeByUserId[profile.id]
+
+      return {
+        id: profile.id,
+        fullName: profile.full_name,
+        email: profile.email,
+        contactNumber: profile.contact_number,
+        registeredBy: profile.full_name,
+        officeName: office?.office_name || 'Not specified',
+        pillar: office?.pillar || '',
+        assignmentType: office?.assignment_type || '',
+        createdAt: profile.created_at,
+        status: profile.status
+      }
+    })
   } catch (error) {
     console.error('Error fetching pending approvals:', error)
     return []
+  }
+}
+
+/**
+ * Load the distinct filter option values an admin can choose from.
+ * Lives here so components go through the service layer instead of querying
+ * Supabase directly.
+ * @param {number|null} [year]
+ * @returns {Promise<object>} - {offices, pillars, assignmentTypes, goals, perspectives, strategicObjectives, kpis}
+ */
+export async function getFilterOptions(year = null) {
+  const empty = {
+    offices: [],
+    pillars: [],
+    assignmentTypes: [],
+    goals: [],
+    perspectives: [],
+    strategicObjectives: [],
+    kpis: []
+  }
+
+  try {
+    const { data: offices, error: officesError } = await supabase
+      .from('offices')
+      .select('id, office_name, pillar, assignment_type, profiles (status)')
+      .order('office_name')
+
+    if (officesError) throw officesError
+
+    const approved = (offices || []).filter(o => matchesOfficeApprovalStatus(o.profiles))
+
+    if (approved.length === 0) return empty
+
+    let entriesQuery = supabase
+      .from('bsc_entries')
+      .select('goal, perspective, strategic_objective, kpi')
+      .in('office_id', approved.map(o => o.id))
+
+    if (year !== null && year !== undefined) {
+      entriesQuery = entriesQuery.eq('target_year', year)
+    }
+
+    const { data: entries, error: entriesError } = await entriesQuery
+
+    if (entriesError) throw entriesError
+
+    const distinct = (items, key) => [...new Set(items.map(item => item[key]).filter(Boolean))].sort()
+
+    return {
+      offices: approved.map(o => o.office_name),
+      pillars: distinct(approved, 'pillar'),
+      assignmentTypes: distinct(approved, 'assignment_type'),
+      goals: distinct(entries || [], 'goal'),
+      perspectives: distinct(entries || [], 'perspective'),
+      strategicObjectives: distinct(entries || [], 'strategic_objective'),
+      kpis: distinct(entries || [], 'kpi')
+    }
+  } catch (error) {
+    console.error('Error loading filter options:', error)
+    return empty
   }
 }

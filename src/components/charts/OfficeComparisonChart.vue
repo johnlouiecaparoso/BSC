@@ -96,7 +96,9 @@ const chartOptions = computed(() => ({
   scales: {
     x: {
       beginAtZero: true,
-      max: 100,
+      // suggestedMax keeps the familiar 0-100 frame but lets bars above 100%
+      // extend instead of being silently clipped at the axis edge.
+      suggestedMax: 100,
       ticks: {
         callback: (value) => `${value}%`
       }

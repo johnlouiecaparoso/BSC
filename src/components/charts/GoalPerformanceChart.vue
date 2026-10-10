@@ -44,11 +44,14 @@ const props = defineProps({
 
 const hasData = computed(() => props.labels.length > 0 && props.datasets.length > 0)
 
-// Dynamic height based on number of labels for horizontal bars
+// Dynamic height based on number of labels for horizontal bars. Each goal needs
+// room for one bar per visible quarter now that the series are grouped.
 const dynamicHeight = computed(() => {
   const baseHeight = 120
-  const perBar = 40
-  const height = Math.max(320, baseHeight + props.labels.length * perBar)
+  const perBar = 22
+  const seriesCount = Math.max(props.datasets.length, 1)
+  const height = Math.max(320, baseHeight + props.labels.length * perBar * seriesCount)
+
   return `${height}px`
 })
 
@@ -95,14 +98,18 @@ const chartOptions = computed(() => ({
   },
   scales: {
     x: {
-      stacked: true,
+      // Deliberately NOT stacked. Each dataset is a quarterly average, so
+      // stacking summed four independent percentages into a 0-400% bar that
+      // meant nothing. Grouped bars compare quarters side by side instead.
+      stacked: false,
       beginAtZero: true,
+      suggestedMax: 100,
       ticks: {
         callback: (value) => `${value}%`
       }
     },
     y: {
-      stacked: true,
+      stacked: false,
       ticks: {
         font: {
           size: 11

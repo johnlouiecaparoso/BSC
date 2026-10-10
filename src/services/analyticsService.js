@@ -1,4 +1,17 @@
 import { supabase } from '@/lib/supabase'
+import { toNumber } from '@/utils/computeAccomplishment'
+import { getCurrentYear, getQuarterStartMonth, QUARTERS } from '@/utils/quarterHelpers'
+
+/**
+ * Analytics Service
+ * Full Supabase implementation for analytics and chart data.
+ *
+ * Every aggregation here follows the same shape: fetch offices, entries and
+ * records in a fixed number of round trips, then group in memory. Looping a
+ * query per office turns one chart into 2N sequential requests.
+ */
+
+const ID_CHUNK_SIZE = 200
 
 const normalizeText = (value) => (value || '').toString().trim().toLowerCase()
 
@@ -58,49 +71,185 @@ const applyRecordFilters = (records = [], filters = {}) => {
   })
 }
 
+const matchesEntryFilters = (entry, filters = {}) =>
+  matchesContains(entry.goal, filters.goal) &&
+  matchesContains(entry.perspective, filters.perspective) &&
+  matchesContains(entry.strategic_objective, filters.strategicObjective) &&
+  matchesContains(entry.kpi, filters.kpi)
+
+const matchesOfficeFilters = (office, filters = {}, officeSearch = null) => {
+  if (officeSearch && !matchesContains(office.office_name, officeSearch)) return false
+  if (!matchesContains(office.office_name, filters.office)) return false
+  if (filters.pillar && !matchesContains(office.pillar, filters.pillar)) return false
+  if (filters.assignmentType && !matchesContains(office.assignment_type, filters.assignmentType)) return false
+
+  return true
+}
+
 /**
- * Analytics Service
- * Full Supabase implementation for analytics and chart data
+ * Splits a list of ids into chunks so `.in(...)` never builds an over-long URL.
+ * @param {array} items
+ * @param {number} size
+ * @returns {array[]}
  */
+function chunk(items, size = ID_CHUNK_SIZE) {
+  const chunks = []
+
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size))
+  }
+
+  return chunks
+}
+
+/**
+ * Fetches every approved office once.
+ * @returns {Promise<array>}
+ */
+async function fetchApprovedOffices() {
+  const { data, error } = await supabase
+    .from('offices')
+    .select('id, office_name, pillar, assignment_type, profiles (status)')
+
+  if (error) throw error
+
+  return (data || []).filter(office => matchesOfficeApprovalStatus(office.profiles))
+}
+
+/**
+ * Fetches BSC entries for the given offices in as few requests as possible.
+ * @param {string[]} officeIds
+ * @param {number|null} year
+ * @returns {Promise<array>}
+ */
+async function fetchEntries(officeIds, year = null) {
+  if (officeIds.length === 0) return []
+
+  const batches = await Promise.all(
+    chunk(officeIds).map(async (ids) => {
+      let query = supabase
+        .from('bsc_entries')
+        .select('id, office_id, goal, perspective, strategic_objective, kpi')
+        .in('office_id', ids)
+
+      if (year !== null && year !== undefined) {
+        query = query.eq('target_year', year)
+      }
+
+      const { data, error } = await query
+
+      if (error) throw error
+
+      return data || []
+    })
+  )
+
+  return batches.flat()
+}
+
+/**
+ * Fetches quarterly records for the given entries in as few requests as possible.
+ * @param {string[]} entryIds
+ * @param {object} options - {quarter, year, status}
+ * @returns {Promise<array>}
+ */
+async function fetchRecords(entryIds, { quarter = null, year = null, status = null } = {}) {
+  if (entryIds.length === 0) return []
+
+  const batches = await Promise.all(
+    chunk(entryIds).map(async (ids) => {
+      let query = supabase
+        .from('quarterly_records')
+        .select('bsc_entry_id, quarter, year, quarterly_target, month_1, month_2, month_3, status, focal_person')
+        .in('bsc_entry_id', ids)
+
+      if (quarter) query = query.eq('quarter', quarter)
+      if (year !== null && year !== undefined) query = query.eq('year', year)
+      if (status) query = query.eq('status', status)
+
+      const { data, error } = await query
+
+      if (error) throw error
+
+      return data || []
+    })
+  )
+
+  return batches.flat()
+}
+
+/**
+ * Groups an array by a key selector.
+ * @param {array} items
+ * @param {function} keyOf
+ * @returns {object}
+ */
+function groupBy(items, keyOf) {
+  return items.reduce((acc, item) => {
+    const key = keyOf(item)
+
+    if (!acc[key]) acc[key] = []
+    acc[key].push(item)
+
+    return acc
+  }, {})
+}
+
+/**
+ * Sums the three monthly columns of a record.
+ * @param {object} record
+ * @returns {number}
+ */
+function recordTotal(record) {
+  return toNumber(record.month_1) + toNumber(record.month_2) + toNumber(record.month_3)
+}
 
 /**
  * Get university-wide statistics
+ * @param {number|null} [year] - Reporting year, null for all years
  * @returns {Promise<object>}
  */
-export async function getUniversityWideStats() {
+export async function getUniversityWideStats(year = getCurrentYear()) {
   try {
-    // Total approved offices
-    const { count: totalOffices } = await supabase
-      .from('profiles')
-      .select('id', { count: 'exact', head: true })
-      .eq('role', 'office')
-      .eq('status', 'approved')
-
-    // Total BSC entries
-    const { count: totalEntries } = await supabase
-      .from('bsc_entries')
-      .select('id', { count: 'exact', head: true })
-
-    // Pending approvals
-    const { count: pendingApprovals } = await supabase
-      .from('profiles')
-      .select('id', { count: 'exact', head: true })
-      .eq('status', 'pending')
-      .eq('role', 'office')
-
-    // Entries with issues but no focal person
-    const { data: issueRecords } = await supabase
+    let issuesQuery = supabase
       .from('quarterly_records')
-      .select('id')
+      .select('id', { count: 'exact', head: true })
       .not('issues', 'is', null)
       .neq('issues', '')
       .or('focal_person.is.null,focal_person.eq.')
 
+    if (year !== null && year !== undefined) {
+      issuesQuery = issuesQuery.eq('year', year)
+    }
+
+    let entriesQuery = supabase
+      .from('bsc_entries')
+      .select('id', { count: 'exact', head: true })
+
+    if (year !== null && year !== undefined) {
+      entriesQuery = entriesQuery.eq('target_year', year)
+    }
+
+    const [offices, entries, pending, issues] = await Promise.all([
+      supabase
+        .from('profiles')
+        .select('id', { count: 'exact', head: true })
+        .eq('role', 'office')
+        .eq('status', 'approved'),
+      entriesQuery,
+      supabase
+        .from('profiles')
+        .select('id', { count: 'exact', head: true })
+        .eq('status', 'pending')
+        .eq('role', 'office'),
+      issuesQuery
+    ])
+
     return {
-      totalOffices: totalOffices || 0,
-      totalEntries: totalEntries || 0,
-      pendingApprovals: pendingApprovals || 0,
-      entriesWithIssuesNoFocalPerson: issueRecords?.length || 0
+      totalOffices: offices.count || 0,
+      totalEntries: entries.count || 0,
+      pendingApprovals: pending.count || 0,
+      entriesWithIssuesNoFocalPerson: issues.count || 0
     }
   } catch (error) {
     console.error('Error fetching university stats:', error)
@@ -116,50 +265,38 @@ export async function getUniversityWideStats() {
 /**
  * Get office-specific statistics
  * @param {string} officeId
+ * @param {object} [options] - {quarter, year}
  * @returns {Promise<object>}
  */
-export async function getOfficeStats(officeId) {
+export async function getOfficeStats(officeId, { quarter = null, year = getCurrentYear() } = {}) {
   try {
-    // Get BSC entries for this office
-    const { data: entries, error: entriesError } = await supabase
-      .from('bsc_entries')
-      .select('id')
-      .eq('office_id', officeId)
-
-    if (entriesError) throw entriesError
-
-    const entryIds = (entries || []).map(e => e.id)
+    const entries = await fetchEntries([officeId], year)
+    const entryIds = entries.map(e => e.id)
 
     if (entryIds.length === 0) {
       return { totalEntries: 0, averageAccomplishment: 0, completedEntries: 0 }
     }
 
-    // Get quarterly records for these entries
-    const { data: records } = await supabase
-      .from('quarterly_records')
-      .select('*')
-      .in('bsc_entry_id', entryIds)
+    const records = await fetchRecords(entryIds, { quarter, year })
 
-    // Count completed entries
-    const completedEntries = (records || []).filter(r => r.status === 'Completed').length
+    const completedEntries = records.filter(r => r.status === 'Completed').length
 
-    // Compute average accomplishment
-    let totalPercentage = 0
-    let countWithTarget = 0
+    let totalAccomplishment = 0
+    let totalTarget = 0
 
-    for (const record of (records || [])) {
-      const target = parseFloat(record.quarterly_target)
-      if (target && target > 0) {
-        const total = (parseFloat(record.month_1) || 0) +
-                      (parseFloat(record.month_2) || 0) +
-                      (parseFloat(record.month_3) || 0)
-        totalPercentage += (total / target) * 100
-        countWithTarget++
+    for (const record of records) {
+      const target = toNumber(record.quarterly_target)
+
+      if (target > 0) {
+        totalAccomplishment += recordTotal(record)
+        totalTarget += target
       }
     }
 
-    const averageAccomplishment = countWithTarget > 0
-      ? Math.round(totalPercentage / countWithTarget)
+    // Weighted by target rather than a mean of per-record percentages, so a KPI
+    // with a target of 500 counts for more than one with a target of 2.
+    const averageAccomplishment = totalTarget > 0
+      ? Math.round((totalAccomplishment / totalTarget) * 100)
       : 0
 
     return {
@@ -174,131 +311,39 @@ export async function getOfficeStats(officeId) {
 }
 
 /**
- * Resolve which office IDs match the current filter set.
- * Returns null if no filter narrows the set (meaning "all offices").
- * @param {object} filters
- * @returns {Promise<string[]|null>}
- */
-async function resolveFilteredOfficeIds(filters = {}) {
-  const hasOfficeFilter = filters.office || filters.pillar || filters.assignmentType
-  if (!hasOfficeFilter) return null
-
-  let query = supabase
-    .from('offices')
-    .select('id, office_name, pillar, assignment_type, profiles(status)')
-
-  const { data, error } = await query
-  if (error) throw error
-
-  let offices = (data || []).filter(o => matchesOfficeApprovalStatus(o.profiles))
-
-  if (filters.office) {
-    offices = offices.filter(o =>
-      o.office_name.toLowerCase().includes(filters.office.toLowerCase())
-    )
-  }
-  if (filters.pillar) {
-    offices = offices.filter(o =>
-      o.pillar && o.pillar.toLowerCase().includes(filters.pillar.toLowerCase())
-    )
-  }
-  if (filters.assignmentType) {
-    offices = offices.filter(o =>
-      o.assignment_type && o.assignment_type.toLowerCase().includes(filters.assignmentType.toLowerCase())
-    )
-  }
-
-  return offices.map(o => o.id)
-}
-
-/**
- * Resolve entry IDs for the given office IDs + entry-level filters (perspective).
- * @param {string[]|null} officeIds - null means all offices
- * @param {object} filters
- * @returns {Promise<string[]>}
- */
-async function resolveFilteredEntryIds(officeIds, filters = {}) {
-  let query = supabase
-    .from('bsc_entries')
-    .select('id, office_id, goal, perspective, strategic_objective, kpi')
-
-  if (officeIds !== null && officeIds.length > 0) {
-    query = query.in('office_id', officeIds)
-  } else if (officeIds !== null && officeIds.length === 0) {
-    return []
-  }
-
-  const { data, error } = await query
-  if (error) throw error
-
-  return (data || [])
-    .filter(entry =>
-      matchesContains(entry.goal, filters.goal) &&
-      matchesContains(entry.perspective, filters.perspective) &&
-      matchesContains(entry.strategic_objective, filters.strategicObjective) &&
-      matchesContains(entry.kpi, filters.kpi)
-    )
-    .map(e => e.id)
-}
-
-/**
- * Get status distribution across all quarterly records
- * @param {object} filters
+ * Get status distribution across quarterly records
+ * @param {object} filters - May include quarter, year and the FilterPanel fields
  * @returns {Promise<object>}
  */
 export async function getStatusDistribution(filters = {}) {
+  const distribution = {
+    notStarted: 0,
+    ongoing: 0,
+    completed: 0,
+    delayed: 0,
+    forValidation: 0
+  }
+
   try {
-    // Resolve office + entry filters
-    const officeIds = await resolveFilteredOfficeIds(filters)
-    const entryIds = await resolveFilteredEntryIds(officeIds, filters)
+    const year = filters.year ?? getCurrentYear()
 
-    // If filters were applied and resulted in empty set, return zeros
-    if ((officeIds !== null && officeIds.length === 0) || entryIds.length === 0) {
-      // Only return zeros if a filter was actually set
-      const anyFilterSet = filters.office || filters.pillar || filters.assignmentType || filters.goal || filters.perspective || filters.strategicObjective || filters.kpi
-      if (anyFilterSet) {
-        return { notStarted: 0, ongoing: 0, completed: 0, delayed: 0, forValidation: 0 }
-      }
-    }
+    const offices = await fetchApprovedOffices()
+    const scopedOffices = offices.filter(office => matchesOfficeFilters(office, filters))
 
-    let query = supabase
-      .from('quarterly_records')
-      .select('status, quarter, focal_person')
+    if (scopedOffices.length === 0) return distribution
 
-    if (filters.quarter) {
-      query = query.eq('quarter', filters.quarter)
-    }
+    const entries = await fetchEntries(scopedOffices.map(o => o.id), year)
+    const scopedEntries = entries.filter(entry => matchesEntryFilters(entry, filters))
 
-    if (entryIds.length > 0 && (
-      officeIds !== null ||
-      filters.goal ||
-      filters.perspective ||
-      filters.strategicObjective ||
-      filters.kpi
-    )) {
-      query = query.in('bsc_entry_id', entryIds)
-    }
+    if (scopedEntries.length === 0) return distribution
 
-    // Filter by status
-    if (filters.status) {
-      query = query.eq('status', filters.status)
-    }
+    const records = await fetchRecords(scopedEntries.map(e => e.id), {
+      quarter: filters.quarter || null,
+      year,
+      status: filters.status || null
+    })
 
-    const { data, error } = await query
-
-    if (error) throw error
-
-    const filteredData = applyRecordFilters(data || [], filters)
-
-    const distribution = {
-      notStarted: 0,
-      ongoing: 0,
-      completed: 0,
-      delayed: 0,
-      forValidation: 0
-    }
-
-    for (const record of filteredData) {
+    for (const record of applyRecordFilters(records, filters)) {
       switch (record.status) {
         case 'Not Started': distribution.notStarted++; break
         case 'Ongoing': distribution.ongoing++; break
@@ -311,160 +356,88 @@ export async function getStatusDistribution(filters = {}) {
     return distribution
   } catch (error) {
     console.error('Error fetching status distribution:', error)
-    return { notStarted: 0, ongoing: 0, completed: 0, delayed: 0, forValidation: 0 }
+    return distribution
   }
 }
 
 /**
- * Get accomplishment data by office for a quarter
+ * Get accomplishment data by office for a quarter.
+ * Runs three queries total regardless of how many offices exist.
  * @param {string} quarter
- * @param {string} officeFilter - Optional office name to filter by
+ * @param {string|null} officeSearch - Optional office name from the search bar
  * @param {object} filters - Additional filters from FilterPanel
  * @returns {Promise<array>}
  */
-export async function getAccomplishmentByOffice(quarter = 'q1', officeFilter = null, filters = {}) {
+export async function getAccomplishmentByOffice(quarter = 'q1', officeSearch = null, filters = {}) {
   try {
-    // Get approved offices without relying on a filtered join so we keep every office visible
-    const { data: offices, error: officesError } = await supabase
-      .from('offices')
-      .select(`
-        id,
-        office_name,
-        pillar,
-        assignment_type,
-        profiles (
-          status
-        )
-      `)
+    const year = filters.year ?? getCurrentYear()
 
-    if (officesError) throw officesError
+    const offices = await fetchApprovedOffices()
+    const scopedOffices = offices.filter(office => matchesOfficeFilters(office, filters, officeSearch))
 
+    if (scopedOffices.length === 0) return []
+
+    const entries = await fetchEntries(scopedOffices.map(o => o.id), year)
+    const scopedEntries = entries.filter(entry => matchesEntryFilters(entry, filters))
+    const entriesByOffice = groupBy(scopedEntries, e => e.office_id)
+
+    const records = await fetchRecords(scopedEntries.map(e => e.id), {
+      quarter,
+      year,
+      status: filters.status || null
+    })
+    const recordsByEntry = groupBy(records, r => r.bsc_entry_id)
+
+    const hasRecordFilter = Boolean(filters.status || filters.hasFocalPerson)
     const results = []
 
-    for (const office of (offices || [])) {
-      if (!matchesOfficeApprovalStatus(office.profiles)) {
-        continue
-      }
+    for (const office of scopedOffices) {
+      const officeEntries = entriesByOffice[office.id] || []
 
-      // Filter by office name if provided (search bar)
-      if (officeFilter && !office.office_name.toLowerCase().includes(officeFilter.toLowerCase())) {
-        continue
-      }
-
-      // Filter by office dropdown
-      if (filters.office && !office.office_name.toLowerCase().includes(filters.office.toLowerCase())) {
-        continue
-      }
-
-      // Filter by pillar
-      if (filters.pillar && (!office.pillar || !office.pillar.toLowerCase().includes(filters.pillar.toLowerCase()))) {
-        continue
-      }
-
-      // Filter by assignment type
-      if (filters.assignmentType && (!office.assignment_type || !office.assignment_type.toLowerCase().includes(filters.assignmentType.toLowerCase()))) {
-        continue
-      }
-
-      // Get entries for this office
-      let entryQuery = supabase
-        .from('bsc_entries')
-        .select('id, goal, perspective, strategic_objective, kpi')
-        .eq('office_id', office.id)
-
-      const { data: entries } = await entryQuery
-
-      const filteredEntries = (entries || []).filter(entry =>
-        matchesContains(entry.goal, filters.goal) &&
-        matchesContains(entry.perspective, filters.perspective) &&
-        matchesContains(entry.strategic_objective, filters.strategicObjective) &&
-        matchesContains(entry.kpi, filters.kpi)
-      )
-
-      const entryIds = filteredEntries.map(e => e.id)
-
-      // Check if any record-level filters are active
-      const hasRecordFilter = filters.status || filters.hasFocalPerson
-
-      if (entryIds.length === 0) {
-        // Only include offices with no entries when no record-level filter is active
+      if (officeEntries.length === 0) {
+        // Offices with no entries still appear at 0% so they are visible as
+        // non-reporting, but only when no record-level filter is narrowing the view.
         if (!hasRecordFilter) {
-          results.push({ 
+          results.push({
             officeId: office.id,
-            officeName: office.office_name, 
+            officeName: office.office_name,
             totalAccomplishment: 0,
             totalTarget: 0,
-            percentage: 0 
+            percentage: 0
           })
         }
         continue
       }
 
-      // Get quarterly records - must match quarter
-      let recQuery = supabase
-        .from('quarterly_records')
-        .select('quarterly_target, month_1, month_2, month_3, status, focal_person')
-        .in('bsc_entry_id', entryIds)
-        .eq('quarter', quarter)
+      const rawRecords = officeEntries.flatMap(entry => recordsByEntry[entry.id] || [])
 
-      // Filter by status at query level
-      if (filters.status) {
-        recQuery = recQuery.eq('status', filters.status)
-      }
+      if (!matchesOfficeFocalPersonFilter(rawRecords, filters)) continue
 
-      const { data: rawRecords } = await recQuery
+      const officeRecords = applyRecordFilters(rawRecords, filters)
 
-      if (!matchesOfficeFocalPersonFilter(rawRecords || [], filters)) {
-        continue
-      }
-
-      const records = applyRecordFilters(rawRecords || [], filters)
-
-      // Skip this office entirely if record-level filters are active and no records match
-      if (hasRecordFilter && records.length === 0) {
-        continue
-      }
+      if (hasRecordFilter && officeRecords.length === 0) continue
 
       let totalAccomplishment = 0
       let totalTarget = 0
 
-      for (const record of records) {
-        // Safely parse numeric values - handle both null and string values
-        const target = record.quarterly_target !== null && record.quarterly_target !== undefined 
-          ? parseFloat(record.quarterly_target) 
-          : 0
-        
-        if (target && target > 0) {
-          const month1 = record.month_1 !== null && record.month_1 !== undefined 
-            ? parseFloat(record.month_1) 
-            : 0
-          const month2 = record.month_2 !== null && record.month_2 !== undefined 
-            ? parseFloat(record.month_2) 
-            : 0
-          const month3 = record.month_3 !== null && record.month_3 !== undefined 
-            ? parseFloat(record.month_3) 
-            : 0
-          
-          const total = month1 + month2 + month3
-          totalAccomplishment += total
+      for (const record of officeRecords) {
+        const target = toNumber(record.quarterly_target)
+
+        if (target > 0) {
+          totalAccomplishment += recordTotal(record)
           totalTarget += target
         }
       }
-
-      const officePercentage = totalTarget > 0
-        ? Math.round((totalAccomplishment / totalTarget) * 100)
-        : 0
 
       results.push({
         officeId: office.id,
         officeName: office.office_name,
         totalAccomplishment,
         totalTarget,
-        percentage: officePercentage
+        percentage: totalTarget > 0 ? Math.round((totalAccomplishment / totalTarget) * 100) : 0
       })
     }
 
-    // Sort by percentage descending
     return results.sort((a, b) => b.percentage - a.percentage)
   } catch (error) {
     console.error('Error fetching accomplishment by office:', error)
@@ -473,109 +446,78 @@ export async function getAccomplishmentByOffice(quarter = 'q1', officeFilter = n
 }
 
 /**
- * Get monthly trend data for an office or university-wide
+ * Get monthly trend data for an office or university-wide.
+ * Returns twelve values; months with no reported data are null so the line
+ * breaks rather than dropping to zero.
  * @param {string|null} officeId - null for university-wide
  * @param {number} year
  * @param {object} filters - Additional filters
- * @returns {Promise<array>}
+ * @returns {Promise<Array<number|null>>}
  */
-export async function getMonthlyTrend(officeId = null, year = 2026, filters = {}) {
+export async function getMonthlyTrend(officeId = null, year = getCurrentYear(), filters = {}) {
   try {
-    // Build base query for quarterly records
-    let entryIds = []
+    const reportingYear = year ?? filters.year ?? getCurrentYear()
+
+    let officeIds
 
     if (officeId) {
-      // Get entries for specific office
-      let query = supabase
-        .from('bsc_entries')
-        .select('id, goal, perspective, strategic_objective, kpi')
-        .eq('office_id', officeId)
-
-      const { data: entries } = await query
-      entryIds = (entries || [])
-        .filter(entry =>
-          matchesContains(entry.goal, filters.goal) &&
-          matchesContains(entry.perspective, filters.perspective) &&
-          matchesContains(entry.strategic_objective, filters.strategicObjective) &&
-          matchesContains(entry.kpi, filters.kpi)
-        )
-        .map(e => e.id)
+      officeIds = [officeId]
     } else {
-      // Resolve office-level filters
-      const filteredOfficeIds = await resolveFilteredOfficeIds(filters)
-
-      let query = supabase
-        .from('bsc_entries')
-        .select('id, goal, perspective, strategic_objective, kpi')
-
-      if (filteredOfficeIds !== null && filteredOfficeIds.length > 0) {
-        query = query.in('office_id', filteredOfficeIds)
-      } else if (filteredOfficeIds !== null && filteredOfficeIds.length === 0) {
-        return []
-      }
-
-      const { data: entries } = await query
-      entryIds = (entries || [])
-        .filter(entry =>
-          matchesContains(entry.goal, filters.goal) &&
-          matchesContains(entry.perspective, filters.perspective) &&
-          matchesContains(entry.strategic_objective, filters.strategicObjective) &&
-          matchesContains(entry.kpi, filters.kpi)
-        )
-        .map(e => e.id)
+      const offices = await fetchApprovedOffices()
+      officeIds = offices
+        .filter(office => matchesOfficeFilters(office, filters))
+        .map(o => o.id)
     }
 
-    if (entryIds.length === 0) return []
+    if (officeIds.length === 0) return []
 
-    // Get all quarterly records
-    let recQuery = supabase
-      .from('quarterly_records')
-      .select('quarter, quarterly_target, month_1, month_2, month_3, status, focal_person')
-      .in('bsc_entry_id', entryIds)
+    const entries = await fetchEntries(officeIds, reportingYear)
+    const scopedEntries = entries.filter(entry => matchesEntryFilters(entry, filters))
 
-    if (filters.status) {
-      recQuery = recQuery.eq('status', filters.status)
-    }
+    if (scopedEntries.length === 0) return []
 
-    const { data: rawRecords } = await recQuery
+    const rawRecords = await fetchRecords(scopedEntries.map(e => e.id), {
+      year: reportingYear,
+      status: filters.status || null
+    })
+    const records = applyRecordFilters(rawRecords, filters)
 
-    const records = applyRecordFilters(rawRecords || [], filters)
-
-    // Map quarters to months: q1 = Jan/Feb/Mar, q2 = Apr/May/Jun, etc.
-    const monthlyData = new Array(12).fill(0)
-    const monthlyCounts = new Array(12).fill(0)
+    const monthlyTotals = new Array(12).fill(0)
+    const monthlyTargets = new Array(12).fill(0)
+    const monthlyReported = new Array(12).fill(false)
 
     for (const record of records) {
-      // Safely parse numeric values - handle both null and string values
-      const target = record.quarterly_target !== null && record.quarterly_target !== undefined
-        ? parseFloat(record.quarterly_target)
-        : 0
-      
+      const target = toNumber(record.quarterly_target)
+
       if (target <= 0) continue
 
-      let baseMonth = 0
-      switch (record.quarter) {
-        case 'q1': baseMonth = 0; break
-        case 'q2': baseMonth = 3; break
-        case 'q3': baseMonth = 6; break
-        case 'q4': baseMonth = 9; break
-        default: continue
-      }
+      const baseMonth = getQuarterStartMonth(record.quarter)
 
+      // Unknown quarter values would otherwise write outside the 12-month array.
+      if (baseMonth === null) continue
+
+      // A quarterly target spread evenly across its three months, so a month's
+      // percentage is comparable to the others.
+      const monthlyTarget = target / 3
       const months = [record.month_1, record.month_2, record.month_3]
-      months.forEach((val, i) => {
-        const monthVal = val !== null && val !== undefined ? parseFloat(val) : 0
-        if (monthVal > 0) {
-          monthlyData[baseMonth + i] += (monthVal / target) * 100
-          monthlyCounts[baseMonth + i]++
-        }
+
+      months.forEach((value, index) => {
+        // A reported 0 is real data and must pull the average down. Only a null
+        // (nothing submitted) is skipped — the old `> 0` check dropped genuine
+        // zeros and biased the trend upward.
+        if (value === null || value === undefined) return
+
+        monthlyTotals[baseMonth + index] += toNumber(value)
+        monthlyTargets[baseMonth + index] += monthlyTarget
+        monthlyReported[baseMonth + index] = true
       })
     }
 
-    // Average the percentages
-    return monthlyData.map((total, i) =>
-      monthlyCounts[i] > 0 ? Math.round(total / monthlyCounts[i]) : 0
-    )
+    return monthlyTotals.map((total, index) => {
+      if (!monthlyReported[index] || monthlyTargets[index] <= 0) return null
+
+      return Math.round((total / monthlyTargets[index]) * 100)
+    })
   } catch (error) {
     console.error('Error fetching monthly trend:', error)
     return []
@@ -583,132 +525,117 @@ export async function getMonthlyTrend(officeId = null, year = 2026, filters = {}
 }
 
 /**
- * Get performance data grouped by goal
+ * Get performance data grouped by goal.
+ * Datasets are per-quarter averages, so the chart must render them grouped —
+ * stacking them would sum four averages into a meaningless 0-400% bar.
  * @param {string|null} quarter
  * @param {object} filters - Additional filters
  * @returns {Promise<object>} - { labels, datasets }
  */
 export async function getGoalPerformance(quarter = null, filters = {}) {
+  const empty = { labels: [], datasets: [] }
+
   try {
-    // Resolve office-level filters
-    const filteredOfficeIds = await resolveFilteredOfficeIds(filters)
+    const year = filters.year ?? getCurrentYear()
 
-    let entryQuery = supabase
-      .from('bsc_entries')
-      .select(`
-        id,
-        goal,
-        office_id,
-        perspective,
-        strategic_objective,
-        kpi,
-        quarterly_records (
-          quarter,
-          quarterly_target,
-          month_1,
-          month_2,
-          month_3,
-          status,
-          focal_person
-        )
-      `)
+    const offices = await fetchApprovedOffices()
+    const scopedOffices = offices.filter(office => matchesOfficeFilters(office, filters))
 
-    if (filteredOfficeIds !== null && filteredOfficeIds.length > 0) {
-      entryQuery = entryQuery.in('office_id', filteredOfficeIds)
-    } else if (filteredOfficeIds !== null && filteredOfficeIds.length === 0) {
-      return { labels: [], datasets: [] }
-    }
+    if (scopedOffices.length === 0) return empty
 
-    const { data: entries, error } = await entryQuery
+    const entries = await fetchEntries(scopedOffices.map(o => o.id), year)
+    const scopedEntries = entries.filter(entry => matchesEntryFilters(entry, filters))
 
-    if (error) throw error
+    if (scopedEntries.length === 0) return empty
 
-    // Group by goal
+    const records = await fetchRecords(scopedEntries.map(e => e.id), {
+      quarter: quarter || null,
+      year,
+      status: filters.status || null
+    })
+    const recordsByEntry = groupBy(applyRecordFilters(records, filters), r => r.bsc_entry_id)
+
+    // Accumulate accomplishment and target per goal per quarter, so the result is
+    // weighted by target instead of averaging percentages of unequal size.
     const goalMap = {}
 
-    for (const entry of (entries || []).filter(entry =>
-      matchesContains(entry.goal, filters.goal) &&
-      matchesContains(entry.perspective, filters.perspective) &&
-      matchesContains(entry.strategic_objective, filters.strategicObjective) &&
-      matchesContains(entry.kpi, filters.kpi)
-    )) {
-      if (!goalMap[entry.goal]) {
-        goalMap[entry.goal] = { q1: [], q2: [], q3: [], q4: [] }
+    for (const entry of scopedEntries) {
+      const goal = entry.goal || 'Unspecified goal'
+
+      if (!goalMap[goal]) {
+        goalMap[goal] = QUARTERS.reduce((acc, q) => {
+          acc[q] = { accomplishment: 0, target: 0 }
+          return acc
+        }, {})
       }
 
-      for (const record of (entry.quarterly_records || [])) {
-        if (quarter && record.quarter !== quarter) {
-          continue
-        }
+      for (const record of (recordsByEntry[entry.id] || [])) {
+        const bucket = goalMap[goal][record.quarter]
 
-        // Apply status filter
-        if (filters.status && record.status !== filters.status) {
-          continue
-        }
+        // Skip quarters outside q1-q4 rather than throwing on an undefined bucket.
+        if (!bucket) continue
 
-        // Apply focal person filter
-        if (applyRecordFilters([record], filters).length === 0) {
-          continue
-        }
+        const target = toNumber(record.quarterly_target)
 
-        const target = parseFloat(record.quarterly_target) || 0
         if (target <= 0) continue
-        const total = (parseFloat(record.month_1) || 0) +
-                      (parseFloat(record.month_2) || 0) +
-                      (parseFloat(record.month_3) || 0)
-        const pct = Math.round((total / target) * 100)
-        goalMap[entry.goal][record.quarter].push(pct)
+
+        bucket.accomplishment += recordTotal(record)
+        bucket.target += target
       }
     }
 
     const labels = Object.keys(goalMap)
 
-    if (labels.length === 0) return { labels: [], datasets: [] }
+    if (labels.length === 0) return empty
 
-    const quarterColors = quarter
-      ? {
-          [quarter]: { bg: '#3b82f6', label: quarter.toUpperCase() }
-        }
-      : {
-          q1: { bg: '#3b82f6', label: 'Q1' },
-          q2: { bg: '#10b981', label: 'Q2' },
-          q3: { bg: '#f59e0b', label: 'Q3' },
-          q4: { bg: '#ef4444', label: 'Q4' }
-        }
+    const quarterStyles = {
+      q1: { bg: '#3b82f6', label: 'Q1' },
+      q2: { bg: '#10b981', label: 'Q2' },
+      q3: { bg: '#f59e0b', label: 'Q3' },
+      q4: { bg: '#ef4444', label: 'Q4' }
+    }
 
-    const datasets = Object.keys(quarterColors).map(q => ({
-      label: quarterColors[q].label,
-      backgroundColor: quarterColors[q].bg,
-      data: labels.map(goal => {
-        const values = goalMap[goal][q]
-        return values.length > 0
-          ? Math.round(values.reduce((a, b) => a + b, 0) / values.length)
-          : 0
-      })
-    }))
+    const visibleQuarters = quarter ? [quarter] : QUARTERS
+
+    const datasets = visibleQuarters
+      .filter(q => quarterStyles[q])
+      .map(q => ({
+        label: quarterStyles[q].label,
+        backgroundColor: quarterStyles[q].bg,
+        data: labels.map((goal) => {
+          const bucket = goalMap[goal][q]
+
+          return bucket && bucket.target > 0
+            ? Math.round((bucket.accomplishment / bucket.target) * 100)
+            : 0
+        })
+      }))
 
     return { labels, datasets }
   } catch (error) {
     console.error('Error fetching goal performance:', error)
-    return { labels: [], datasets: [] }
+    return empty
   }
 }
 
 /**
  * Get entries that have issues reported but no focal person assigned
  * Used for the Alerts table on the admin dashboard
+ * @param {number|null} [year] - Reporting year, null for all years
  * @returns {Promise<array>}
  */
-export async function getEntriesWithIssuesNoFocalPerson() {
+export async function getEntriesWithIssuesNoFocalPerson(year = getCurrentYear()) {
   try {
-    const { data: records, error } = await supabase
+    let query = supabase
       .from('quarterly_records')
       .select(`
         id,
         quarter,
+        year,
         issues,
         focal_person,
         bsc_entry_id,
+        updated_at,
         bsc_entries (
           id,
           kpi,
@@ -721,11 +648,17 @@ export async function getEntriesWithIssuesNoFocalPerson() {
       `)
       .not('issues', 'is', null)
       .neq('issues', '')
+      .order('updated_at', { ascending: false })
+
+    if (year !== null && year !== undefined) {
+      query = query.eq('year', year)
+    }
+
+    const { data: records, error } = await query
 
     if (error) throw error
 
-    // Filter to only those without a focal person
-    const alerts = (records || [])
+    return (records || [])
       .filter(r => !r.focal_person || r.focal_person.trim() === '')
       .map(r => ({
         id: r.id,
@@ -733,11 +666,11 @@ export async function getEntriesWithIssuesNoFocalPerson() {
         officeId: r.bsc_entries?.offices?.id || '',
         kpi: r.bsc_entries?.kpi || 'Unknown KPI',
         quarter: r.quarter,
+        year: r.year,
         issue: r.issues,
-        entryId: r.bsc_entry_id
+        entryId: r.bsc_entry_id,
+        updatedAt: r.updated_at
       }))
-
-    return alerts
   } catch (error) {
     console.error('Error fetching entries with issues:', error)
     return []

@@ -5,6 +5,9 @@
       <div class="absolute inset-0 flex flex-col items-center justify-center">
         <div :class="percentageClasses">{{ percentage }}%</div>
         <div class="text-sm text-gray-600 mt-1">Complete</div>
+        <div v-if="isOverAchieving" class="text-xs font-medium text-green-600 mt-0.5">
+          Exceeds target
+        </div>
       </div>
     </div>
     <div v-else class="flex items-center justify-center h-full bg-gray-50 rounded-lg w-full">
@@ -26,6 +29,7 @@ import {
   ArcElement,
   Tooltip
 } from 'chart.js'
+import { clampPercentage } from '@/utils/computeAccomplishment'
 
 ChartJS.register(ArcElement, Tooltip)
 
@@ -35,6 +39,12 @@ const props = defineProps({
     default: null
   }
 })
+
+// The arc can only draw 0-100. Feeding it [120, -20] produced a broken,
+// wrapping doughnut, so the arc is clamped while the label keeps the true value.
+const arcValue = computed(() => clampPercentage(props.percentage))
+
+const isOverAchieving = computed(() => Number(props.percentage) > 100)
 
 const gaugeColor = computed(() => {
   if (props.percentage === null) return '#d1d5db'
@@ -54,7 +64,7 @@ const percentageClasses = computed(() => {
 const chartData = computed(() => ({
   datasets: [
     {
-      data: [props.percentage || 0, 100 - (props.percentage || 0)],
+      data: [arcValue.value, 100 - arcValue.value],
       backgroundColor: [gaugeColor.value, '#e5e7eb'],
       borderWidth: 0,
       cutout: '75%'
@@ -62,7 +72,7 @@ const chartData = computed(() => ({
   ]
 }))
 
-const chartOptions = {
+const chartOptions = computed(() => ({
   responsive: true,
   maintainAspectRatio: true,
   plugins: {
@@ -73,5 +83,5 @@ const chartOptions = {
       display: false
     }
   }
-}
+}))
 </script>

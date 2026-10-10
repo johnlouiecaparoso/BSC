@@ -57,7 +57,7 @@ const chartData = computed(() => ({
   ]
 }))
 
-const chartOptions = {
+const chartOptions = computed(() => ({
   responsive: true,
   maintainAspectRatio: false,
   indexAxis: 'y',
@@ -68,16 +68,23 @@ const chartOptions = {
     title: {
       display: true,
       text: props.title
+    },
+    tooltip: {
+      callbacks: {
+        label: (context) => `${context.dataset.label}: ${context.parsed.x}%`
+      }
     }
   },
   scales: {
     x: {
       beginAtZero: true,
-      max: 100,
+      // suggestedMax, not max: a hard cap of 100 clipped every over-performing
+      // office so 140% looked identical to 100%.
+      suggestedMax: 100,
       ticks: {
         callback: (value) => `${value}%`
       }
     }
   }
-}
+}))
 </script>

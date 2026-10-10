@@ -1,49 +1,107 @@
 import { supabase } from '@/lib/supabase'
+import { toNullableNumber } from '@/utils/computeAccomplishment'
+import { getCurrentYear } from '@/utils/quarterHelpers'
 
 /**
- * Get quarterly records for an office
+ * Maps a database row onto the camelCase shape the UI works with.
+ * @param {object} record
+ * @returns {object}
+ */
+function mapRecord(record) {
+  return {
+    id: record.id,
+    entryId: record.bsc_entry_id,
+    quarter: record.quarter,
+    year: record.year,
+    quarterlyTarget: record.quarterly_target,
+    month1: record.month_1,
+    month2: record.month_2,
+    month3: record.month_3,
+    keyActivities: record.key_activities,
+    mov: record.mov,
+    status: record.status,
+    issues: record.issues,
+    assistance: record.assistance,
+    focalPerson: record.focal_person,
+    updatedAt: record.updated_at,
+    createdAt: record.created_at
+  }
+}
+
+/**
+ * Builds the writable column set from UI data.
+ * Numeric fields go through toNullableNumber so a typed 0 is stored as 0 and
+ * only a blank field becomes null.
+ * @param {object} data
+ * @returns {object}
+ */
+function buildRecordPayload(data) {
+  return {
+    quarterly_target: toNullableNumber(data.quarterlyTarget),
+    month_1: toNullableNumber(data.month1),
+    month_2: toNullableNumber(data.month2),
+    month_3: toNullableNumber(data.month3),
+    key_activities: data.keyActivities || null,
+    mov: data.mov || null,
+    status: data.status || null,
+    issues: data.issues || null,
+    assistance: data.assistance || null,
+    updated_at: new Date().toISOString()
+  }
+}
+
+/**
+ * Get quarterly records for a single office
  * @param {string} officeId - The office ID (not user ID)
  * @param {string} quarter - q1, q2, q3, q4
+ * @param {number} [year] - Reporting year, defaults to the current year
  * @returns {Promise<array>}
  */
-export async function getRecords(officeId, quarter) {
+export async function getRecords(officeId, quarter, year = getCurrentYear()) {
+  return getRecordsForOffices([officeId], quarter, year)
+}
+
+/**
+ * Get quarterly records for several offices in one round trip.
+ * Callers used to loop getRecords per office, which meant two sequential
+ * queries per office on every quarter change.
+ * @param {string[]} officeIds
+ * @param {string} quarter - q1, q2, q3, q4
+ * @param {number} [year] - Reporting year, defaults to the current year
+ * @returns {Promise<array>}
+ */
+export async function getRecordsForOffices(officeIds = [], quarter, year = getCurrentYear()) {
   try {
-    // Get all BSC entries for this specific office
+    const ids = officeIds.filter(Boolean)
+
+    if (ids.length === 0) return []
+
     const { data: entries, error: entriesError } = await supabase
       .from('bsc_entries')
       .select('id')
-      .eq('office_id', officeId)
+      .in('office_id', ids)
 
     if (entriesError) throw entriesError
 
-    const entryIds = entries.map(e => e.id)
+    const entryIds = (entries || []).map(e => e.id)
 
     if (entryIds.length === 0) return []
 
-    // Get quarterly records for these entries AND this quarter
-    const { data, error } = await supabase
+    let query = supabase
       .from('quarterly_records')
       .select('*')
       .in('bsc_entry_id', entryIds)
       .eq('quarter', quarter)
 
+    if (year !== null && year !== undefined) {
+      query = query.eq('year', year)
+    }
+
+    const { data, error } = await query
+
     if (error) throw error
 
-    return data.map(record => ({
-      id: record.id,
-      entryId: record.bsc_entry_id,
-      quarter: record.quarter,
-      quarterlyTarget: record.quarterly_target,
-      month1: record.month_1,
-      month2: record.month_2,
-      month3: record.month_3,
-      keyActivities: record.key_activities,
-      mov: record.mov,
-      status: record.status,
-      issues: record.issues,
-      assistance: record.assistance,
-      focalPerson: record.focal_person
-    }))
+    return (data || []).map(mapRecord)
   } catch (error) {
     console.error('Error fetching quarterly records:', error)
     return []
@@ -51,47 +109,35 @@ export async function getRecords(officeId, quarter) {
 }
 
 /**
- * Save quarterly record
- * @param {string} userId
+ * Save quarterly record (insert or update for the entry/year/quarter)
  * @param {string} entryId
  * @param {string} quarter
+ * @param {number} year
  * @param {object} data - Performance and activities data
  * @returns {Promise<object>}
  */
-export async function saveRecord(userId, entryId, quarter, data) {
+export async function saveRecord(entryId, quarter, year, data) {
   try {
-    // Check if record exists
+    const reportingYear = year ?? getCurrentYear()
+
     const { data: existing, error: checkError } = await supabase
       .from('quarterly_records')
       .select('id')
       .eq('bsc_entry_id', entryId)
       .eq('quarter', quarter)
+      .eq('year', reportingYear)
       .maybeSingle()
 
     if (checkError) throw checkError
 
-    const recordData = {
-      bsc_entry_id: entryId,
-      quarter: quarter,
-      quarterly_target: data.quarterlyTarget || null,
-      month_1: data.month1 || null,
-      month_2: data.month2 || null,
-      month_3: data.month3 || null,
-      key_activities: data.keyActivities || null,
-      mov: data.mov || null,
-      status: data.status || null,
-      issues: data.issues || null,
-      assistance: data.assistance || null,
-      updated_at: new Date().toISOString()
-    }
+    const payload = buildRecordPayload(data)
 
     let savedRecord = null
 
     if (existing) {
-      // Update existing record
       const { data: updatedRecord, error } = await supabase
         .from('quarterly_records')
-        .update(recordData)
+        .update(payload)
         .eq('id', existing.id)
         .select('*')
         .single()
@@ -99,10 +145,14 @@ export async function saveRecord(userId, entryId, quarter, data) {
       if (error) throw error
       savedRecord = updatedRecord
     } else {
-      // Insert new record
       const { data: insertedRecord, error } = await supabase
         .from('quarterly_records')
-        .insert(recordData)
+        .insert({
+          ...payload,
+          bsc_entry_id: entryId,
+          quarter,
+          year: reportingYear
+        })
         .select('*')
         .single()
 
@@ -113,21 +163,7 @@ export async function saveRecord(userId, entryId, quarter, data) {
     return {
       success: true,
       message: 'Quarterly record saved successfully',
-      record: {
-        id: savedRecord.id,
-        entryId: savedRecord.bsc_entry_id,
-        quarter: savedRecord.quarter,
-        quarterlyTarget: savedRecord.quarterly_target,
-        month1: savedRecord.month_1,
-        month2: savedRecord.month_2,
-        month3: savedRecord.month_3,
-        keyActivities: savedRecord.key_activities,
-        mov: savedRecord.mov,
-        status: savedRecord.status,
-        issues: savedRecord.issues,
-        assistance: savedRecord.assistance,
-        focalPerson: savedRecord.focal_person
-      }
+      record: mapRecord(savedRecord)
     }
   } catch (error) {
     throw new Error(error.message || 'Failed to save quarterly record')
@@ -169,23 +205,16 @@ export async function deleteRecord(recordId) {
  */
 export async function updateRecord(recordId, data) {
   try {
-    const { error } = await supabase
+    const { error, count } = await supabase
       .from('quarterly_records')
-      .update({
-        quarterly_target: data.quarterlyTarget || null,
-        month_1: data.month1 || null,
-        month_2: data.month2 || null,
-        month_3: data.month3 || null,
-        key_activities: data.keyActivities || null,
-        mov: data.mov || null,
-        status: data.status || null,
-        issues: data.issues || null,
-        assistance: data.assistance || null,
-        updated_at: new Date().toISOString()
-      })
+      .update(buildRecordPayload(data), { count: 'exact' })
       .eq('id', recordId)
 
     if (error) throw error
+
+    if (count === 0) {
+      throw new Error('Failed to update quarterly record. Record may not exist or permission was denied.')
+    }
 
     return {
       success: true,

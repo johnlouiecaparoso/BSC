@@ -39,7 +39,11 @@ const props = defineProps({
   }
 })
 
-const hasData = computed(() => props.data.length > 0)
+// Months with nothing reported come through as null. Treat the series as empty
+// only when no month has a value, so a genuine all-zero quarter still charts.
+const hasData = computed(() =>
+  props.data.some(value => value !== null && value !== undefined)
+)
 
 const chartData = computed(() => ({
   labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'],
@@ -50,12 +54,15 @@ const chartData = computed(() => ({
       borderColor: '#3b82f6',
       backgroundColor: 'rgba(59, 130, 246, 0.1)',
       tension: 0.4,
-      fill: true
+      fill: true,
+      // Leave a visible gap for unreported months rather than drawing a line
+      // through them as if performance were zero.
+      spanGaps: false
     }
   ]
 }))
 
-const chartOptions = {
+const chartOptions = computed(() => ({
   responsive: true,
   maintainAspectRatio: false,
   plugins: {
@@ -66,15 +73,24 @@ const chartOptions = {
     title: {
       display: true,
       text: props.title
+    },
+    tooltip: {
+      callbacks: {
+        label: (context) => {
+          if (context.parsed.y === null) return 'Not reported'
+          return `${context.dataset.label}: ${context.parsed.y}%`
+        }
+      }
     }
   },
   scales: {
     y: {
       beginAtZero: true,
+      suggestedMax: 100,
       ticks: {
         callback: (value) => `${value}%`
       }
     }
   }
-}
+}))
 </script>

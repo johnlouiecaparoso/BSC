@@ -52,47 +52,31 @@ export async function login(email, password) {
  */
 export async function register(userData) {
   try {
-    // Create auth user
+    // The profile and office rows are created by the handle_new_user trigger
+    // from this metadata. Doing it server-side keeps registration atomic and
+    // works whether or not signUp returns a session — client-side inserts fail
+    // RLS when email confirmation is enabled, which used to strand the user
+    // with an auth account, no office, and no way to retry.
     const { data: authData, error: authError } = await supabase.auth.signUp({
       email: userData.email,
       password: userData.password,
       options: {
         data: {
-          full_name: userData.fullName
+          full_name: userData.fullName,
+          office_name: userData.officeName,
+          contact_number: userData.contactNumber || ''
         }
       }
     })
 
     if (authError) throw authError
 
-    // Create or update profile (upsert handles the case where
-    // the handle_new_user trigger already created the row)
-    const { error: profileError } = await supabase
-      .from('profiles')
-      .upsert({
-        id: authData.user.id,
-        full_name: userData.fullName,
-        email: userData.email,
-        role: 'office',
-        contact_number: null,
-        status: 'pending'
-      }, { onConflict: 'id' })
+    if (!authData.user) {
+      throw new Error('Registration failed. Please try again.')
+    }
 
-    if (profileError) throw profileError
-
-    // Create office
-    const { error: officeError } = await supabase
-      .from('offices')
-      .insert({
-        user_id: authData.user.id,
-        office_name: userData.officeName,
-        pillar: '',
-        assignment_type: ''
-      })
-
-    if (officeError) throw officeError
-
-    // Sign out immediately (they need approval first)
+    // Sign out immediately (they need approval first). Harmless when
+    // confirmation is enabled and no session was issued.
     await supabase.auth.signOut()
 
     return {

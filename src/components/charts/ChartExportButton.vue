@@ -36,6 +36,9 @@
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { useToast } from 'vue-toastification'
+
+const toast = useToast()
 
 const props = defineProps({
   targetSelector: {
@@ -76,22 +79,51 @@ const handleExport = async (format) => {
 
   const targetEl = document.querySelector(props.targetSelector)
   if (!targetEl) {
-    console.error('Export target not found:', props.targetSelector)
+    toast.error('Could not find the chart to export.')
     return
   }
 
   // Find all canvas elements inside the target
   const canvases = targetEl.querySelectorAll('canvas')
   if (canvases.length === 0) {
-    console.error('No chart canvas found in target')
+    toast.error('There is no chart to export yet.')
     return
   }
 
-  if (format === 'pdf') {
-    await exportAsPDF(canvases)
-  } else {
-    await exportAsImage(canvases, format)
+  try {
+    if (format === 'pdf') {
+      await exportAsPDF(canvases)
+    } else {
+      await exportAsImage(canvases, format)
+    }
+  } catch (error) {
+    console.error('Chart export failed:', error)
+    toast.error(error.message || 'Failed to export the chart.')
   }
+}
+
+/**
+ * Resolves once the image is decoded, rejecting on error or timeout.
+ * Awaiting a bare `onload` meant a failed decode hung the export forever with
+ * no feedback.
+ */
+const loadImage = (src, timeoutMs = 10000) => {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    const timer = setTimeout(() => {
+      reject(new Error('Timed out while preparing the chart image.'))
+    }, timeoutMs)
+
+    img.onload = () => {
+      clearTimeout(timer)
+      resolve(img)
+    }
+    img.onerror = () => {
+      clearTimeout(timer)
+      reject(new Error('Could not read the chart image.'))
+    }
+    img.src = src
+  })
 }
 
 const exportAsImage = async (canvases, format) => {
@@ -103,9 +135,7 @@ const exportAsImage = async (canvases, format) => {
 
   const images = []
   for (const canvas of canvases) {
-    const img = new Image()
-    img.src = canvas.toDataURL(`image/${format === 'jpg' ? 'jpeg' : 'png'}`, 1.0)
-    await new Promise(resolve => { img.onload = resolve })
+    const img = await loadImage(canvas.toDataURL(`image/${format === 'jpg' ? 'jpeg' : 'png'}`, 1.0))
     images.push({ img, width: canvas.width, height: canvas.height })
     totalHeight += canvas.height + gap
     maxWidth = Math.max(maxWidth, canvas.width)
@@ -143,7 +173,8 @@ const exportAsPDF = async (canvases) => {
 
   const printWindow = window.open('', '_blank')
   if (!printWindow) {
-    // Fallback: download as PNG instead
+    // Pop-up blocked — fall back to a PNG download and say why.
+    toast.info('Pop-up blocked, downloading as a PNG instead.')
     await exportAsImage(canvases, 'png')
     return
   }
